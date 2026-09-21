@@ -110,9 +110,11 @@ def make_adaptive_decision(rome_manager: rome.Manager, stage_dir: str):
                 accepted += uid is not None
 
         # -- ROME HOOK 2: collect the improved model -----------------------
-        # The trainer publishes into the ProteinMPNN checkout's weights dir, so
-        # the next MPNN pass picks it up with no wrapper change; this just reports
-        # what ROME currently has.
+        # get_current_model() returns the latest *versioned* checkpoint
+        # ({model_name}_v{n}.pt, kept per round). With publish_into_repo the round
+        # also copies it onto the checkout's fixed weights pointer, so the next
+        # MPNN pass picks it up with no wrapper change; this just reports what
+        # ROME currently has (the basename shows the version).
         weights = rome_manager.get_current_model()
         pipeline.logger.pipeline_log(
             f'ROME: corpus {rome_manager.data.total_count} (+{accepted} this pass) | '

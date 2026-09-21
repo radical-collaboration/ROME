@@ -26,7 +26,9 @@ Job spec (all keys written by ``ProteinMPNNTrainer``)::
     {
       "mpnn_repo": "/path/to/ProteinMPNN",   # the checkout, for its training modules
       "resume_from": "/path/to/v_48_020.pt", # initial weights, or the previous round
-      "target_weights": "/path/to/out.pt",   # where to write the new checkpoint
+      "target_weights": ".../v3/v_48_020_v3.pt",  # versioned, never overwritten
+      "publish_copy": ".../vanilla_model_weights/v_48_020.pt",  # or null; the repo
+                                             #   pointer IMPRESS's next pass loads
       "designs": [                           # one per staged structure
         {"name": "d0", "path": "/stage/d0.pdb",
          "designed_chains": ["A"], "context_chains": ["B"]}
@@ -40,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from typing import Any, Dict, Tuple
 
@@ -196,21 +199,34 @@ def run_round(job: Dict[str, Any]) -> str:
             "step": int(step),
             "optimizer_state_dict": optimizer.optimizer.state_dict(),
         }
+        # The durable checkpoint: a versioned, never-overwritten file in this
+        # round's own directory. Write beside it then replace, so a reader never
+        # sees a half-written weights file.
         target = job["target_weights"]
         os.makedirs(os.path.dirname(os.path.abspath(target)) or ".", exist_ok=True)
-        # Write beside the target then replace, so a reader (IMPRESS mid-pass)
-        # never sees a half-written weights file.
         tmp = target + ".tmp"
         torch.save(ckpt, tmp)
         os.replace(tmp, target)
 
-        # Completion marker, written LAST, into this round's output_dir. The
-        # training manager polls for it to detect that the round finished, even
-        # when the execution backend never delivers the task's result (a Dragon
-        # defect — see docs/dragon.md). It has to be this marker rather than the
-        # checkpoint itself: with publish_into_repo the checkpoint is a stable
-        # path that already exists from the previous round. Name kept in sync
-        # with rome.trainer.TRAIN_COMPLETE_MARKER.
+        # With publish_into_repo, also refresh the repo's fixed {model_name}.pt
+        # pointer (a copy of this version) so IMPRESS's next pass loads the new
+        # weights with no wrapper change. The versioned `target` above is the
+        # kept history; this is just the "current" pointer, atomically replaced.
+        publish_copy = job.get("publish_copy")
+        if publish_copy:
+            os.makedirs(os.path.dirname(os.path.abspath(publish_copy)) or ".",
+                        exist_ok=True)
+            ptmp = publish_copy + ".tmp"
+            shutil.copyfile(target, ptmp)
+            os.replace(ptmp, publish_copy)
+
+        # Completion marker, written LAST (after the checkpoint and any pointer
+        # copy), into this round's output_dir. The training manager polls for it
+        # to detect that the round finished, even when the execution backend
+        # never delivers the task's result (a Dragon defect — see docs/dragon.md).
+        # A dedicated marker is unambiguous: it appears only once everything else
+        # is safely on disk. Name kept in sync with
+        # rome.trainer.TRAIN_COMPLETE_MARKER.
         output_dir = job.get("output_dir")
         if output_dir:
             with open(os.path.join(output_dir, "train_complete"), "w") as fd:

@@ -89,22 +89,30 @@ things the integration must get right, both from `docs/impress.md`:
 
 ## 4. What a round produces, and where it goes
 
-The round writes a checkpoint in the original format —
-`{"model_state_dict": ..., "num_edges": 48, "noise_level": 0.2}` — via
-`original_checkpoint`, the exact dict `protein_mpnn_run.py` loads.
+Every round writes a **versioned checkpoint that is never overwritten** —
+`{model_name}_v{version}.pt`, in that round's own directory
+(`<checkpoint_dir>/proteinmpnn/v<version>/`) — in the original format
+`{"model_state_dict": ..., "num_edges": 48, "noise_level": 0.2}` (via
+`original_checkpoint`), the exact dict `protein_mpnn_run.py` loads. So the whole
+history is kept, one file per version, with the version in the name.
+`versioned_checkpoint_path(config, output_dir, version)` names it, and it is what
+`manager.get_current_model()` returns — so anything that reloads off the current
+model reads the exact versioned file.
 
-Getting it *back into the campaign* is the seam that actually closes the loop.
-`mpnn_wrapper.py` never passes `--path_to_model_weights`, so
-`protein_mpnn_run.py` loads `{mpnn_repo}/vanilla_model_weights/{model_name}.pt`
-by default. With `publish_into_repo=True` the trainer writes the new weights
-*there* (atomically — temp file then `os.replace`, so a mid-pass reader never
-sees a half-written file), replacing what the campaign runs with. The next pass
-picks them up with no wrapper change. `model_name` must match the `--model_name`
-IMPRESS runs (`v_48_020` by default).
+Getting the latest *back into the campaign* is the seam that closes the loop.
+`mpnn_wrapper.py` never passes `--path_to_model_weights`, so `protein_mpnn_run.py`
+loads the fixed path `{mpnn_repo}/vanilla_model_weights/{model_name}.pt` by
+default. With `publish_into_repo=True` the round **copies** its versioned
+checkpoint onto that fixed pointer (atomically — temp file then `os.replace`, so a
+mid-pass reader never sees a half-written file), so the next pass runs the new
+weights with no wrapper change. `repo_pointer_path(config)` names that pointer;
+`model_name` must match the `--model_name` IMPRESS runs (`v_48_020` by default).
+The pointer is just "the current version" — the versioned files remain the kept
+archive.
 
-Without `publish_into_repo`, the checkpoint lands in the round's `output_dir` and
-pointing MPNN at it is the integration's job — e.g. patch the wrapper to pass
-`--path_to_model_weights`.
+Without `publish_into_repo`, only the versioned checkpoints are written, and
+pointing MPNN at the one you want is the integration's job — e.g. pass its path
+via `--path_to_model_weights`, reading it from `get_current_model()`.
 
 ## 5. Config that must match the weights
 
@@ -183,7 +191,35 @@ checkpoint format and publication path) is covered unconditionally in
 `(manifest_path, output_dir, config) -> checkpoint_path` — for a fork, or to
 bring the campaign up one layer at a time before switching the real loop on.
 
-## 8. Open items
+## 8. Generation as a stream (the other half of the loop)
+
+The trainer *improves* ProteinMPNN; `examples/impress_r/mpnn_stream.py` *runs* it
+as a ROME inference stream, so a protein workflow can use all three managers
+(generate → score → train → hot-swap) the way the LLM examples do. Feed the
+stream backbone PDBs, get designed sequences back; when the trainer publishes a
+new checkpoint the stream reloads onto it and the next batch is designed with the
+improved model.
+
+Two implementations, both **subprocess** — neither reimplements ProteinMPNN's
+sampling, so both run the checkout's own tested inference:
+
+* `mpnn_run_stream` — the ROME-native path: `protein_mpnn_run.py` per backbone,
+  passing `--path_to_model_weights` so it uses the *exact* published versioned
+  checkpoint (clean per-version hot-swap).
+* `impress_mpnn_stream` — the IMPRESS path: this example's `mpnn_wrapper.py`
+  (chain parse/assign + `protein_mpnn_run.py`), i.e. exactly what the campaign
+  runs. Its wrapper can't take an explicit weights path, so on each reload the
+  stream refreshes the repo's fixed `{model_name}.pt` pointer to the new
+  checkpoint — the same pointer `publish_into_repo` keeps current.
+
+A request is `{"backbone_id", "pdb_path", "design_chains"?, "num_seqs"?}`; each
+output record is `{"backbone_id", "sequence", "score", "sample", "model_version",
+"pdb_path"}` — hand it to a reward stream (AlphaFold) and then
+`add_training_data`, closing the loop back to the trainer. The FASTA parser,
+command builders and reload hook are covered in `tests/unit/test_mpnn_stream.py`;
+the subprocess paths need the checkout and a GPU, so they run on-cluster.
+
+## 9. Open items
 
 * **Drift.** Fine-tuning only on self-generated designs pulls the model toward
   the campaign. The standard mitigation mixes in a slice of the original PDB

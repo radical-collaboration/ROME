@@ -1,4 +1,4 @@
-"""LLM GRPO trainer task.
+"""LLM trainer tasks: GRPO (reinforcement) and SFT (supervised).
 
 The trainer shipped with the framework (the ProteinMPNN trainer lives with the
 IMPRESS-R example, ``examples/impress_r/mpnn.py``). It is the demonstration that
@@ -226,6 +226,178 @@ class GRPOTrainer(TrainTask):
 
 
 # ---------------------------------------------------------------------------
+# Supervised fine-tuning (SFT) — "train on the good ones"
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SFTConfig:
+    """Configuration for supervised fine-tuning in the ROME framework.
+
+    SFT trains the model to imitate chosen ``(prompt, completion)`` pairs. In the
+    self-improvement loop it is the "train on the good ones" half: an inference
+    stream generates candidates, a reward stream scores them, the data manager
+    keeps the best/correct ones, and this fine-tunes on those — rejection-sampling
+    / STaR-style, with no preference or RL objective. The reward that *selects*
+    the data lives in the data manager (a filter/sampler) or a reward stream, not
+    here; SFT only sees the winners.
+
+    Parameters
+    ----------
+    model_config : ModelConfig
+        What to train. Required.
+    learning_rate, batch_size, num_epochs, gradient_accumulation_steps
+        The usual SFT knobs.
+    prompt_column, completion_column : str
+        Corpus fields holding the instruction and the response to imitate.
+    text_column : str
+        Field holding a fully-formatted training string. When a record lacks it,
+        the trainer builds it from prompt+completion via the tokenizer's chat
+        template; when present, it is used as-is.
+    trl_config : Optional[trl.SFTConfig]
+        Fully-specified TRL config. Overrides the individual knobs above.
+    extra_args : dict
+        Additional keyword arguments merged into the constructed TRL config —
+        e.g. ``max_seq_length`` / ``max_length``, whose name varies by TRL
+        version, so it is left out of the defaults on purpose.
+    """
+
+    model_config: Optional[ModelConfig] = None
+    learning_rate: float = 2e-5
+    batch_size: int = 4
+    num_epochs: int = 3
+    gradient_accumulation_steps: int = 8
+    prompt_column: str = "prompt"
+    completion_column: str = "completion"
+    text_column: str = "text"
+    trl_config: Any = None
+    extra_args: Dict[str, Any] = field(default_factory=dict)
+
+    def build_trl_config(self, output_dir: str) -> Any:
+        """Materialize a ``trl.SFTConfig`` (imported here so the manager never
+        pays for TRL)."""
+        if self.trl_config is not None:
+            return self.trl_config
+        from trl import SFTConfig as TRLSFTConfig
+
+        args = dict(
+            output_dir=output_dir,
+            learning_rate=self.learning_rate,
+            warmup_ratio=0.1,
+            lr_scheduler_type="cosine",
+            logging_steps=1,
+            num_train_epochs=self.num_epochs,
+            per_device_train_batch_size=self.batch_size,
+            gradient_accumulation_steps=self.gradient_accumulation_steps,
+        )
+        args.update(self.extra_args)
+        return TRLSFTConfig(**args)
+
+
+def _format_chat(tokenizer: Any, prompt: str, completion: str) -> str:
+    """Format one prompt+completion as the model's own chat string.
+
+    Uses the tokenizer's chat template so an instruct model trains on the exact
+    format it is prompted in; falls back to a plain join for a base tokenizer
+    with no template.
+    """
+    apply = getattr(tokenizer, "apply_chat_template", None)
+    if apply is not None:
+        try:
+            return apply(
+                [{"role": "user", "content": prompt},
+                 {"role": "assistant", "content": completion}],
+                tokenize=False,
+            )
+        except Exception:  # noqa: BLE001 - a template that rejects the turns
+            pass
+    return f"{prompt}\n{completion}"
+
+
+class SFTTrainer(TrainTask):
+    """SFT trainer task in the ROME framework — the counterpart to GRPO.
+
+    Parameters mirror :class:`GRPOTrainer`: a :class:`SFTConfig` (with the
+    :class:`ModelConfig` to train), resources forwarded to asyncflow, and
+    optional ``transformers`` callbacks.
+    """
+
+    def __init__(
+        self,
+        config: SFTConfig,
+        *,
+        gpus: Optional[int] = None,
+        nodes: int = 1,
+        trainer_callbacks: Optional[List[Any]] = None,
+        name: Optional[str] = None,
+    ):
+        if config.model_config is None:
+            raise ValueError("SFTConfig.model_config must be set")
+        super().__init__(
+            gpus=gpus if gpus is not None else config.model_config.required_gpus,
+            nodes=nodes,
+            name=name or "sft",
+        )
+        self.config = config
+        self.trainer_callbacks = trainer_callbacks
+
+    #: TRL wants a ``datasets.Dataset``, so the data manager builds one.
+    wants_hf_dataset = True
+
+    def validate(self, dataset: Any) -> None:
+        super().validate(dataset)
+        cfg = self.config
+        columns = getattr(dataset, "column_names", None)
+        if columns is None:
+            return
+        has_text = cfg.text_column in columns
+        has_pair = (cfg.prompt_column in columns
+                    and cfg.completion_column in columns)
+        if not (has_text or has_pair):
+            raise ValueError(
+                f"SFT needs either a {cfg.text_column!r} column or both "
+                f"{cfg.prompt_column!r} and {cfg.completion_column!r}; the corpus "
+                f"has {sorted(columns)}. Store the chosen response via "
+                "add_training_data(prompt=..., completion=...)."
+            )
+
+    def train(self, dataset: Any, output_dir: str, **kwargs: Any) -> str:
+        """Run one SFT round on the chosen pairs and return the checkpoint path.
+
+        Like GRPO, torch/transformers/TRL/peft are imported here — on the node
+        that has the GPUs, never in the manager process.
+        """
+        from trl import SFTTrainer as TRLSFTTrainer
+
+        model_config = self.config.model_config
+        model, tokenizer = load_model(model_config)
+        dataset = self._ensure_text(dataset, tokenizer)
+
+        trainer = TRLSFTTrainer(
+            model=model,
+            processing_class=tokenizer,
+            args=self.config.build_trl_config(output_dir),
+            train_dataset=dataset,
+            callbacks=self.trainer_callbacks,
+        )
+        trainer.train()
+        return save_model(model, model_config, output_dir)
+
+    def _ensure_text(self, dataset: Any, tokenizer: Any) -> Any:
+        """Add ``text_column`` from prompt+completion when it is absent."""
+        cfg = self.config
+        columns = getattr(dataset, "column_names", None) or []
+        if cfg.text_column in columns:
+            return dataset
+
+        def to_text(record: Dict[str, Any]) -> Dict[str, Any]:
+            return {cfg.text_column: _format_chat(
+                tokenizer, record.get(cfg.prompt_column, ""),
+                record.get(cfg.completion_column, ""))}
+
+        return dataset.map(to_text)
+
+
+# ---------------------------------------------------------------------------
 # Weight loading / saving
 # ---------------------------------------------------------------------------
 
@@ -286,4 +458,5 @@ def save_model(model, model_config: ModelConfig, output_dir: str) -> str:
     return output_dir
 
 
-__all__ = ["ModelConfig", "GRPOConfig", "GRPOTrainer", "load_model", "save_model"]
+__all__ = ["ModelConfig", "GRPOConfig", "GRPOTrainer", "SFTConfig",
+           "SFTTrainer", "load_model", "save_model"]

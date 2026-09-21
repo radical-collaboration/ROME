@@ -32,8 +32,9 @@ from examples.impress_r.mpnn import (
     build_chain_designation,
     original_checkpoint,
     pdb_chain_ids,
-    published_weights_path,
+    repo_pointer_path,
     stage_structures,
+    versioned_checkpoint_path,
 )
 
 
@@ -201,13 +202,27 @@ def test_checkpoint_is_the_format_protein_mpnn_run_loads():
     assert "model" not in ckpt and "state_dict" not in ckpt
 
 
-def test_weights_land_where_impress_will_load_them(tmp_path):
-    """mpnn_wrapper passes no --path_to_model_weights, so the repo default wins."""
+def test_checkpoint_is_versioned_and_not_overwritten(tmp_path):
+    """Each round writes {model_name}_v{version}.pt in its own directory."""
+    cfg = ProteinMPNNConfig(mpnn_repo=str(tmp_path / "ProteinMPNN"),
+                            model_name="v_48_020")
+    v1 = versioned_checkpoint_path(cfg, str(tmp_path / "v1"), 1)
+    v2 = versioned_checkpoint_path(cfg, str(tmp_path / "v2"), 2)
+    assert v1.endswith("v1/v_48_020_v1.pt")
+    assert v2.endswith("v2/v_48_020_v2.pt")
+    assert v1 != v2                                    # versions never collide
+
+
+def test_publish_into_repo_names_the_fixed_pointer(tmp_path):
+    """mpnn_wrapper passes no --path_to_model_weights, so the repo default wins;
+    publish_into_repo copies the latest version onto it (history kept elsewhere)."""
     repo = str(tmp_path / "ProteinMPNN")
     cfg = ProteinMPNNConfig(mpnn_repo=repo, model_name="v_48_020",
                             publish_into_repo=True)
-    assert published_weights_path(cfg, str(tmp_path / "r")) == \
+    assert repo_pointer_path(cfg) == \
         os.path.join(repo, "vanilla_model_weights", "v_48_020.pt")
+    # Off by default: nothing in the shared repo is touched.
+    assert repo_pointer_path(ProteinMPNNConfig(mpnn_repo=repo)) is None
 
 
 # --- runs as a command, not a pickled function (the IMPRESS pattern) ---------
@@ -232,8 +247,9 @@ def test_as_command_returns_a_wrapper_invocation_and_a_checkpoint_path(tmp_path)
     assert command.split()[1].endswith("mpnn_train_wrapper.py")
     job_path = command.split("--job")[1].strip()
     assert os.path.isfile(job_path)
-    # The checkpoint path is where IMPRESS's next pass loads weights from.
-    assert checkpoint == published_weights_path(cfg, outdir)
+    # The checkpoint is the round's durable, versioned file (v1 here).
+    assert checkpoint == os.path.abspath(
+        versioned_checkpoint_path(cfg, outdir, 1))
 
 
 def test_as_command_job_spec_carries_designs_hyperparams_and_resume(tmp_path):
@@ -259,6 +275,31 @@ def test_as_command_job_spec_carries_designs_hyperparams_and_resume(tmp_path):
     assert os.path.isfile(d1["path"])              # structures were staged
     assert job["hyperparams"]["max_epochs"] == 2
     assert job["hyperparams"]["num_neighbors"] == 48
+    # No publish_into_repo here, so the round touches only its own versioned file.
+    assert job["publish_copy"] is None
+    assert job["target_weights"].endswith("_v1.pt")
+
+
+def test_as_command_publishes_a_repo_pointer_when_asked(tmp_path):
+    """publish_into_repo adds the fixed repo pointer alongside the versioned file."""
+    import json
+
+    repo = str(tmp_path / "ProteinMPNN")
+    cfg = ProteinMPNNConfig(mpnn_repo=repo, model_name="v_48_020",
+                            initial_weights=str(tmp_path / "v_48_020.pt"),
+                            publish_into_repo=True)
+    trainer = ProteinMPNNTrainer(cfg)
+    outdir = str(tmp_path / "round")
+    os.makedirs(outdir)
+
+    command, checkpoint = trainer.as_command([_design(tmp_path, "d1")], outdir,
+                                             model_version=5)
+    job = json.load(open(command.split("--job")[1].strip()))
+
+    assert job["target_weights"].endswith("v_48_020_v5.pt")   # versioned, kept
+    assert job["publish_copy"] == \
+        os.path.join(repo, "vanilla_model_weights", "v_48_020.pt")  # fixed pointer
+    assert checkpoint == job["target_weights"]                 # published = versioned
 
 
 def test_as_command_resumes_from_a_prior_round_when_given_one(tmp_path):

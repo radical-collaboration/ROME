@@ -18,12 +18,16 @@ __all__ = [
     "FunctionTrainer",
     "GRPOTrainer",
     "GRPOConfig",
+    "SFTTrainer",
+    "SFTConfig",
     "ModelConfig",
 ]
 
 _LAZY = {
     "GRPOTrainer": "rome.train.llm",
     "GRPOConfig": "rome.train.llm",
+    "SFTTrainer": "rome.train.llm",
+    "SFTConfig": "rome.train.llm",
     "ModelConfig": "rome.train.llm",
 }
 

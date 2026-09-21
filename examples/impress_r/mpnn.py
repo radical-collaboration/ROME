@@ -218,20 +218,35 @@ def original_checkpoint(
     return ckpt
 
 
-def published_weights_path(config: "ProteinMPNNConfig", output_dir: str) -> str:
-    """Where the round's weights go so IMPRESS's next pass picks them up.
+def versioned_checkpoint_path(config: "ProteinMPNNConfig", output_dir: str,
+                              version: int) -> str:
+    """The round's durable checkpoint — versioned, in its own directory.
+
+    Every round writes ``{model_name}_v{version}.pt`` into its own ``output_dir``
+    (the training manager lays these out per version, ``…/v<version>/``), so no
+    round ever overwrites another's weights and the whole history is kept, with
+    the version right in the filename. This is the path ROME publishes as the
+    current model, so :meth:`rome.Manager.get_current_model` (and any reload off
+    it) points at the exact versioned file.
+    """
+    return os.path.join(output_dir, f"{config.model_name}_v{version}.pt")
+
+
+def repo_pointer_path(config: "ProteinMPNNConfig") -> Optional[str]:
+    """The fixed weights path IMPRESS's next pass loads, or ``None``.
 
     ``mpnn_wrapper.py`` never passes ``--path_to_model_weights``, so
     ``protein_mpnn_run.py`` loads ``{mpnn_repo}/vanilla_model_weights/{model_name}.pt``
-    by default. With ``publish_into_repo`` set (and ``mpnn_repo`` known) the
-    checkpoint is written *there*, replacing the weights the campaign runs with;
-    otherwise it lands in the round's ``output_dir`` and the integration is
-    responsible for pointing MPNN at it (e.g. patch the wrapper to pass a path).
+    by default. With ``publish_into_repo`` set (and ``mpnn_repo`` known) the round
+    *copies* its versioned checkpoint onto this fixed path so the next pass runs
+    the new weights with no wrapper change — a pointer to the latest version, not
+    the archive: the versioned files in ``output_dir`` remain the kept history.
+    Returns ``None`` when the round should not touch the repo.
     """
     if config.publish_into_repo and config.mpnn_repo:
         return os.path.join(config.mpnn_repo, "vanilla_model_weights",
                             f"{config.model_name}.pt")
-    return os.path.join(output_dir, f"{config.model_name}.pt")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +292,12 @@ class ProteinMPNNConfig:
     learning_rate_factor, warmup_steps, label_smoothing, gradient_norm : ...
         Noam schedule + label-smoothed NLL, as the original trainer uses.
     publish_into_repo : bool
-        Write the new weights into ``{mpnn_repo}/vanilla_model_weights/`` so the
-        campaign's next pass runs them with no wrapper change. Off by default:
-        it mutates the shared repo, which a workflow should opt into knowingly.
+        Also copy each round's versioned checkpoint onto the repo's fixed
+        ``{mpnn_repo}/vanilla_model_weights/{model_name}.pt`` pointer, so the
+        campaign's next pass runs the new weights with no wrapper change. The
+        versioned checkpoints in the round's own directory are the kept history;
+        this only refreshes the "current" pointer. Off by default: it mutates the
+        shared repo, which a workflow should opt into knowingly.
     seed, num_workers, device : ...
         Reproducibility / loader / placement.
     train_func : optional callable
@@ -531,11 +549,18 @@ class ProteinMPNNTrainer(TrainTask):
                 "context_chains": context,
             })
 
-        target = os.path.abspath(published_weights_path(cfg, output_dir))
+        version = int(kwargs.get("model_version") or 1)
+        # The durable checkpoint: versioned, in this round's own directory, never
+        # overwritten. With publish_into_repo, the wrapper also copies it onto the
+        # repo's fixed {model_name}.pt pointer so IMPRESS's next pass picks it up.
+        target = os.path.abspath(
+            versioned_checkpoint_path(cfg, output_dir, version))
+        pointer = repo_pointer_path(cfg)
         job = {
             "mpnn_repo": cfg.mpnn_repo,
             "resume_from": kwargs.get("model_path") or cfg.initial_weights,
             "target_weights": target,
+            "publish_copy": os.path.abspath(pointer) if pointer else None,
             "output_dir": os.path.abspath(output_dir),
             "designs": designs,
             "hyperparams": {
@@ -767,9 +792,10 @@ __all__ = [
     "ProteinMPNNTrainer",
     "build_chain_designation",
     "stage_structures",
+    "versioned_checkpoint_path",
+    "repo_pointer_path",
     "pdb_chain_ids",
     "original_checkpoint",
-    "published_weights_path",
     "impress_corpus_filter",
     "percentile_sampler",
     "score_percentiles",

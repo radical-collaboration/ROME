@@ -109,18 +109,26 @@ def test_published_checkpoint_is_original_format(tmp_path):
 
 
 def test_weights_publish_into_the_repo_when_asked(tmp_path):
-    """With publish_into_repo the weights replace what IMPRESS's next pass runs."""
-    from examples.impress_r.mpnn import ProteinMPNNConfig, published_weights_path
+    """publish_into_repo names the fixed pointer IMPRESS's next pass loads."""
+    from examples.impress_r.mpnn import (
+        ProteinMPNNConfig,
+        repo_pointer_path,
+        versioned_checkpoint_path,
+    )
 
     repo = str(tmp_path / "ProteinMPNN")
     cfg = ProteinMPNNConfig(mpnn_repo=repo, model_name="v_48_020",
                             publish_into_repo=True)
-    assert published_weights_path(cfg, str(tmp_path / "round")) == \
-        f"{repo}/vanilla_model_weights/v_48_020.pt"
+    # The pointer the wrapper copies the latest version onto (no version in it).
+    assert repo_pointer_path(cfg) == f"{repo}/vanilla_model_weights/v_48_020.pt"
 
+    # Without publish_into_repo there is no repo pointer.
     cfg2 = ProteinMPNNConfig(train_func=lambda *a: "x", model_name="v_48_020")
+    assert repo_pointer_path(cfg2) is None
+
+    # The durable checkpoint is versioned and lives in the round's own dir.
     out = str(tmp_path / "round")
-    assert published_weights_path(cfg2, out) == f"{out}/v_48_020.pt"
+    assert versioned_checkpoint_path(cfg, out, 3) == f"{out}/v_48_020_v3.pt"
 
 
 
@@ -210,6 +218,65 @@ def test_grpo_builds_a_trl_config_pointing_at_the_round_output(tmp_path):
     assert trl_config.output_dir == str(tmp_path)
     assert trl_config.learning_rate == 1e-5
     assert trl_config.seed == 7
+
+
+# -- SFT (the "train on the good ones" trainer) ----------------------------
+
+def test_sft_trainer_needs_a_model_config():
+    from rome.train.llm import SFTConfig, SFTTrainer
+
+    with pytest.raises(ValueError, match="model_config must be set"):
+        SFTTrainer(SFTConfig())
+
+
+def test_sft_takes_its_gpus_from_the_model_config():
+    from rome.train.llm import ModelConfig, SFTConfig, SFTTrainer
+
+    task = SFTTrainer(
+        SFTConfig(model_config=ModelConfig(base_model_name="m", required_gpus=4))
+    )
+    assert task.gpus == 4 and task.name == "sft" and task.wants_hf_dataset is True
+
+
+def test_sft_accepts_prompt_completion_or_preformatted_text():
+    from datasets import Dataset
+
+    from rome.train.llm import ModelConfig, SFTConfig, SFTTrainer
+
+    task = SFTTrainer(SFTConfig(model_config=ModelConfig(base_model_name="m")))
+    task.validate(Dataset.from_list([{"prompt": "2+2?", "completion": "4"}]))
+    task.validate(Dataset.from_list([{"text": "Q: 2+2? A: 4"}]))
+
+
+def test_sft_rejects_a_corpus_missing_both():
+    from datasets import Dataset
+
+    from rome.train.llm import ModelConfig, SFTConfig, SFTTrainer
+
+    task = SFTTrainer(SFTConfig(model_config=ModelConfig(base_model_name="m")))
+    with pytest.raises(ValueError, match="needs either a 'text'"):
+        task.validate(Dataset.from_list([{"prompt": "2+2?", "score": 1.0}]))
+
+
+def test_sft_builds_a_trl_config_pointing_at_the_round_output(tmp_path):
+    from rome.train.llm import ModelConfig, SFTConfig
+
+    config = SFTConfig(model_config=ModelConfig(base_model_name="m"),
+                       learning_rate=3e-5, extra_args={"seed": 11})
+    trl_config = config.build_trl_config(str(tmp_path))
+    assert trl_config.output_dir == str(tmp_path)
+    assert trl_config.learning_rate == 3e-5
+    assert trl_config.seed == 11
+
+
+def test_format_chat_falls_back_without_a_template():
+    from rome.train.llm import _format_chat
+
+    class _NoTemplate:            # a bare tokenizer, no apply_chat_template
+        pass
+
+    text = _format_chat(_NoTemplate(), "2+2?", "4")
+    assert "2+2?" in text and "4" in text
 
 
 # -- on-the-fly calibration ------------------------------------------------
