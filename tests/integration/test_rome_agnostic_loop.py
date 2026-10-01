@@ -199,7 +199,7 @@ def test_a_workflow_can_use_only_the_data_and_training_halves(asyncflow, tmp_pat
 # -- data-manager policy end to end ---------------------------------------
 
 def test_corpus_filters_keep_low_confidence_designs_out_of_training(asyncflow, tmp_path):
-    from examples.impress_r.mpnn import impress_corpus_filter
+    from examples.impress_r.protein_binding.mpnn_trainer import impress_corpus_filter
 
     trainer = FakeTrainer()
     rome = Manager(
