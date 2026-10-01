@@ -19,10 +19,7 @@ requires-python = ">=3.9"
 
 dependencies = [
     "numpy",
-    # The ProteinMPNN trainer builds foundry's training dataframe and writes it
-    # as a parquet shard; foundry itself pulls both in too.
     "pandas",
-    "pyarrow",
     "torch",
     "transformers",
     "peft",

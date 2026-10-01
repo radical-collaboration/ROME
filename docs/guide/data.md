@@ -73,7 +73,7 @@ confidence thresholds.
 
 !!! warning "Filters that select nothing"
 
-    `examples.impress_r.mpnn.impress_corpus_filter()` builds IMPRESS's
+    `examples.impress_r.protein_binding.mpnn_trainer.impress_corpus_filter()` builds IMPRESS's
     pLDDT/pTM/pAE predicate — and its defaults are known to be **too
     permissive**. Measured against a real PDZ campaign they admit 83% of
     records, and `pLDDT >= 80` alone admits 100%, because everything reaching the
@@ -82,7 +82,7 @@ confidence thresholds.
 
     Prefer a fraction-based sampler, which needs no absolute scale — see
     [Percentile sampling](#percentile-sampling-when-you-dont-know-your-thresholds)
-    below and [`docs/impress.md`](../impress.md).
+    below and [what data a round needs](../proteinmpnn_training.md#3-what-data-a-round-needs).
 
 ## Deduplication
 
@@ -132,7 +132,7 @@ rome.DataConfig(sample_func=best_half)
 ### Percentile sampling, when you don't know your thresholds
 
 ```python
-from examples.impress_r.mpnn import percentile_sampler
+from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
 rome.DataConfig(min_samples=24, sample_func=percentile_sampler(0.33))
 ```

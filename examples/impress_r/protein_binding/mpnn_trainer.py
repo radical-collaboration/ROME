@@ -432,14 +432,12 @@ class ProteinMPNNTrainer(TrainTask):
     # -- corpus materialization (testable, no torch) ------------------------
 
     def write_manifest(self, records: List[Dict[str, Any]], output_dir: str) -> str:
-        """Write the round's training manifest (parquet); returns its path.
+        """Write the round's training manifest (JSON); returns its path.
 
         The audit trail for "what did this round train on": one row per design
         with its staged structure, chain designation, and scores. Public and
         side-effect-light so a workflow can inspect a round before trusting it.
         """
-        import pandas as pd
-
         cfg = self.config
         manifest_dir = cfg.manifest_dir or os.path.join(output_dir, "manifest")
         os.makedirs(manifest_dir, exist_ok=True)
@@ -464,8 +462,10 @@ class ProteinMPNNTrainer(TrainTask):
                 "pAE": record.get("pAE"),
                 "produced_under_version": record.get("model_version"),
             })
-        path = os.path.join(manifest_dir, "train_manifest.parquet")
-        pd.DataFrame(rows).to_parquet(path)
+        import json
+        path = os.path.join(manifest_dir, "train_manifest.json")
+        with open(path, "w") as f:
+            json.dump(rows, f, indent=2)
         return path
 
     # -- the round: prepare a job, run it as a command ----------------------

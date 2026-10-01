@@ -214,11 +214,11 @@ bash submit.sh
 
 [PIPELINE-Px] ROME: corpus <n> (+1 this pass) | WAITING  ← not enough data yet
 [PIPELINE-Px] ROME: corpus <n> (+1 this pass) | TRAINING ← round in progress
-[PIPELINE-Px] ROME: corpus <n> (+0 — filtered by ROME) | ...
+[PIPELINE-Px] ROME: corpus <n> (+0 this pass) | ...      ← design was filtered/duplicate
 
 [ROME-TRAINER] submitting training round <n> (<k> designs) -> v<n>
-[ROME-TRAINER] round <path>/train_complete: backend has not delivered a result
-               after <t>s, but checkpoint is on disk — publishing from disk.
+[ROME-TRAINER] round <path>: the execution backend has not delivered a result
+               after <t>s, but the checkpoint is on disk — publishing from disk.
 [ROME-TRAINER] training round <n> failed: <error>
 
 [ROME] v<n> published — corpus <k> designs → <basename>

@@ -1,8 +1,7 @@
 """IMPRESS-R: ROME driven from a real IMPRESS ``adaptive_fn``.
 
-Skipped unless IMPRESS is installed — see ``docs/impress.md`` for how, and note
-the backend rename its archived branch needs on current asyncflow. What this
-pins down is the integration contract, not IMPRESS itself:
+Skipped unless IMPRESS is installed — see ``docs/examples/impress-r.md``.
+What this pins down is the integration contract, not IMPRESS itself:
 
 * ``adaptive_fn`` is the seam — the pipeline's ``run()`` never mentions ROME;
 * designs contributed there reach the corpus and trigger a round;
@@ -19,7 +18,7 @@ import pytest
 impress = pytest.importorskip("impress")
 
 from impress import ImpressBasePipeline, ImpressManager, PipelineSetup  # noqa: E402
-from radical.asyncflow import LocalExecutionBackend  # noqa: E402
+from radical.asyncflow import LocalExecutionBackend, WorkflowEngine  # noqa: E402
 
 import rome  # noqa: E402
 from rome.train.base import TrainTask  # noqa: E402
@@ -126,7 +125,8 @@ def test_adaptive_fn_carries_designs_in_and_checkpoints_out(tmp_path):
     async def scenario():
         await manager.start()
         backend = await LocalExecutionBackend(ThreadPoolExecutor())
-        impress_manager = ImpressManager(execution_backend=backend)
+        flow = await WorkflowEngine.create(backend=backend)
+        impress_manager = ImpressManager(flow)
         try:
             setup = PipelineSetup(
                 name="p1",
@@ -137,7 +137,7 @@ def test_adaptive_fn_carries_designs_in_and_checkpoints_out(tmp_path):
             await impress_manager.start(pipeline_setups=[setup])
             pipelines.extend(impress_manager.pipeline_tasks or [])
         finally:
-            await impress_manager.flow.shutdown()
+            await flow.shutdown()
             await manager.stop()
 
     asyncio.run(scenario())
@@ -157,15 +157,11 @@ def test_rome_can_share_the_impress_engine(tmp_path):
 
     async def scenario():
         backend = await LocalExecutionBackend(ThreadPoolExecutor())
-        impress_manager = ImpressManager(execution_backend=backend)
-        # ImpressManager builds its engine inside start(), so a manager that
-        # wants to share it has to be given it afterwards.
-        from radical.asyncflow import WorkflowEngine
-
-        impress_manager.flow = await WorkflowEngine.create(backend=backend)
+        flow = await WorkflowEngine.create(backend=backend)
+        impress_manager = ImpressManager(flow)
 
         manager = rome.Manager(
-            impress_manager.flow,
+            flow,
             data_config=rome.DataConfig(min_samples=1),
             trainer_config=rome.TrainerConfig(
                 trainer=RecordingTrainer(),
@@ -179,8 +175,8 @@ def test_rome_can_share_the_impress_engine(tmp_path):
         assert not manager._owns_asyncflow
         await manager.stop()
         # ROME left the campaign's engine running.
-        assert manager.asyncflow is impress_manager.flow
-        await impress_manager.flow.shutdown()
+        assert manager.asyncflow is flow
+        await flow.shutdown()
         return checkpoint
 
     assert asyncio.run(scenario())

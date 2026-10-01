@@ -179,7 +179,7 @@ individual knobs).
 stream's `load_func` should use `load_model` — that is how the stream and the
 trainer agree on what a checkpoint means.
 
-### `examples.impress_r.mpnn.ProteinMPNNTrainer`
+### `examples.impress_r.protein_binding.mpnn_trainer.ProteinMPNNTrainer`
 
 Fine-tunes the **original `dauparas/ProteinMPNN`** — the same implementation
 IMPRESS runs — on the campaign's dimers, scoring the designed chain with the
@@ -187,7 +187,7 @@ target peptide as context, and writes an original-format checkpoint that
 `protein_mpnn_run.py` loads.
 
 ```python
-from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer
+from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer
 
 trainer = ProteinMPNNTrainer(ProteinMPNNConfig(
     mpnn_repo="/path/to/dauparas/ProteinMPNN",

@@ -19,7 +19,7 @@ steps are fake, which makes this the right thing to run first on a new backend
 or a new allocation.
 
 ``ROME_BACKEND=dragon`` swaps ``LocalExecutionBackend`` (task bodies as threads
-in this process) for ``rhapsody``'s ``DragonExecutionBackendV3`` (task bodies in
+in this process) for ``rhapsody``'s ``DragonExecutionBackend`` (task bodies in
 real processes/nodes). Two knobs matter there, both because a stream is a
 never-returning service task that holds a slot for the whole run:
 
@@ -49,11 +49,14 @@ STREAM_REPLICAS = int(os.environ.get("ROME_STREAM_REPLICAS", 2))
 
 
 async def _build_backend():
-    """LocalExecutionBackend by default; DragonExecutionBackendV3 on request."""
+    """LocalExecutionBackend by default; DragonExecutionBackend on request."""
     if os.environ.get("ROME_BACKEND", "local").lower() == "dragon":
-        from rhapsody.backends import DragonExecutionBackendV3
+        try:
+            from rhapsody.backends import DragonExecutionBackend
+        except ImportError:
+            from rhapsody.backends import DragonExecutionBackendV3 as DragonExecutionBackend
 
-        return await DragonExecutionBackendV3(
+        return await DragonExecutionBackend(
             {"results_ddict_mem": int(os.environ.get("ROME_RESULTS_MEM",
                                                      512 * 1024 ** 2))}
         )

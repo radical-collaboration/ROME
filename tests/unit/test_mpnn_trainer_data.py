@@ -21,7 +21,6 @@ These answer the questions a campaign operator actually has:
 
 import os
 
-import pandas as pd
 import pytest
 
 from examples.impress_r.protein_binding.mpnn_trainer import (
@@ -168,20 +167,23 @@ def test_staging_copies_each_structure_under_a_unique_name(tmp_path):
 # --- the manifest a round trains on ------------------------------------------
 
 def test_manifest_carries_scores_and_designation(tmp_path):
+    import json
     trainer = ProteinMPNNTrainer(ProteinMPNNConfig(train_func=lambda *a: "x"))
     corpus = [_design(tmp_path, "d1", backbone="p1", model_version=3),
               _design(tmp_path, "d2", backbone="p2")]
     manifest = trainer.write_manifest(corpus, str(tmp_path / "round"))
-    frame = pd.read_parquet(manifest)
-    assert list(frame["design_id"]) == ["d1", "d2"]
-    assert list(frame["designed_chains"]) == ["A", "A"]
-    assert list(frame["context_chains"]) == ["B", "B"]
-    assert frame.iloc[0]["pLDDT"] == 95.0
-    assert frame.iloc[0]["produced_under_version"] == 3
+    with open(manifest) as f:
+        rows = json.load(f)
+    assert [r["design_id"] for r in rows] == ["d1", "d2"]
+    assert [r["designed_chains"] for r in rows] == ["A", "A"]
+    assert [r["context_chains"] for r in rows] == ["B", "B"]
+    assert rows[0]["pLDDT"] == 95.0
+    assert rows[0]["produced_under_version"] == 3
 
 
 def test_a_whole_campaign_group_builds_without_crashing(tmp_path):
     """176 records at the real PDZ score spread — the smoke test."""
+    import json
     corpus = [
         _design(tmp_path, f"d{i}", backbone=f"p{i % 16}", seq="A" * (76 + i % 33))
         for i in range(176)
@@ -189,7 +191,8 @@ def test_a_whole_campaign_group_builds_without_crashing(tmp_path):
     trainer = ProteinMPNNTrainer(ProteinMPNNConfig(train_func=lambda *a: "x"))
     trainer.validate(corpus)
     manifest = trainer.write_manifest(corpus, str(tmp_path / "round"))
-    assert len(pd.read_parquet(manifest)) == 176
+    with open(manifest) as f:
+        assert len(json.load(f)) == 176
 
 
 # --- the implementation target: original ProteinMPNN, not foundry ------------

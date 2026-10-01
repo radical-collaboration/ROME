@@ -192,5 +192,9 @@ rm -f ddict_orc*
 
 echo "Running: dragon ${DRAGON_MODE} ${ROME_SCRIPT}  (nodes=${SLURM_NNODES:-1})"
 dragon ${DRAGON_MODE} "${WORKDIR}/${ROME_SCRIPT}"
+_rc=$?
+dragon-cleanup-deprecated || true
+rm -f ddict_orc*
 
-echo "=== IMPRESS-R ROME [${IMPRESS_USECASE}] done: $(date) ==="
+echo "=== IMPRESS-R ROME [${IMPRESS_USECASE}] done (rc=${_rc}): $(date) ==="
+exit ${_rc}

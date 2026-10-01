@@ -73,12 +73,13 @@ def test_config_requires_a_repo_or_a_train_func():
 
 def test_manifest_records_chain_designation(tmp_path):
     """The manifest is the audit trail, and it carries the dimer designation."""
-    import pandas as pd
+    import json
     from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer
 
     trainer = ProteinMPNNTrainer(ProteinMPNNConfig(train_func=lambda *a: "x"))
     path = trainer.write_manifest([_design(tmp_path, "d1")], str(tmp_path / "r"))
-    row = pd.read_parquet(path).iloc[0]
+    with open(path) as f:
+        row = json.load(f)[0]
     assert row["designed_chains"] == "A"      # chain A designed
     assert row["context_chains"] == "B"       # peptide is context
     assert row["design_id"] == "d1"
@@ -96,7 +97,7 @@ def test_custom_train_func_receives_the_manifest(tmp_path):
     trainer = ProteinMPNNTrainer(ProteinMPNNConfig(train_func=my_train))
     result = trainer.train([_design(tmp_path, "d1")], str(tmp_path))
     assert result == str(tmp_path)
-    assert seen["manifest"].endswith(".parquet")
+    assert seen["manifest"].endswith(".json")
 
 
 def test_published_checkpoint_is_original_format(tmp_path):
@@ -212,7 +213,7 @@ def test_grpo_builds_a_trl_config_pointing_at_the_round_output(tmp_path):
     config = GRPOConfig(
         model_config=ModelConfig(base_model_name="m"),
         learning_rate=1e-5,
-        extra_args={"seed": 7},
+        extra_args={"seed": 7, "use_cpu": True},
     )
     trl_config = config.build_trl_config(str(tmp_path))
     assert trl_config.output_dir == str(tmp_path)
@@ -262,7 +263,7 @@ def test_sft_builds_a_trl_config_pointing_at_the_round_output(tmp_path):
     from rome.train.llm import ModelConfig, SFTConfig
 
     config = SFTConfig(model_config=ModelConfig(base_model_name="m"),
-                       learning_rate=3e-5, extra_args={"seed": 11})
+                       learning_rate=3e-5, extra_args={"seed": 11, "use_cpu": True})
     trl_config = config.build_trl_config(str(tmp_path))
     assert trl_config.output_dir == str(tmp_path)
     assert trl_config.learning_rate == 3e-5

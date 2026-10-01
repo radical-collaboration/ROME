@@ -42,7 +42,7 @@ The whole example is ~90 lines. Its shape is the shape of every ROME adoption.
 
 ```python
 manager = rome.Manager(
-    flow,                                       # your WorkflowEngine
+    backend=backend,                            # execution backend ROME builds its engine on
     data_config=rome.DataConfig(min_samples=PROMPTS_PER_ROUND),
     trainer_config=rome.TrainerConfig(
         trainer=DummyTrainer(train_seconds=1.0, gpus=GPUS),
@@ -143,7 +143,7 @@ ROME_BACKEND=dragon dragon -s examples/agnostic/dummy_loop.py
 ```
 
 This swaps `LocalExecutionBackend` (task bodies as threads in this process) for
-rhapsody's `DragonExecutionBackendV3` (task bodies in real processes, on real
+rhapsody's `DragonExecutionBackend` (task bodies in real processes, on real
 nodes). Two environment knobs matter there, both because a stream is a
 never-returning service task that holds an execution slot for the whole run:
 

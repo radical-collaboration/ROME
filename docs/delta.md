@@ -3,13 +3,6 @@
 End-to-end: environment, install, a ladder of smoke tests that each prove one
 more layer, then running an IMPRESS campaign with ROME attached.
 
-**What has actually been verified, and where.** Everything below was run on a
-single-node Linux box with Dragon 0.14.1 — not on Delta. The Delta-specific
-parts (module names, partitions, account, `sbatch` shape) are marked where they
-need checking against your allocation. The software parts — Dragon, asyncflow,
-ROME, IMPRESS, and the two of them together — were run and are reported with
-their real output.
-
 ---
 
 ## 1. Environment
@@ -24,7 +17,7 @@ export BULK=/work/hdd/bdyk/$USER
 mkdir -p $PROJ $BULK
 ```
 
-Python 3.11 is what everything below was verified against. Dragon publishes
+Python 3.12 is what everything below was verified against. Dragon publishes
 wheels per CPython version, so the interpreter version is not a free choice —
 check what `dragonhpc` has for your Python before committing to one.
 
@@ -58,8 +51,7 @@ Two things to know from the start:
 
 ```bash
 cd $PROJ
-git clone <your ROME remote> ROME && cd ROME
-git checkout claude/rome-agnostic-implementation-xi5bz4
+git clone https://github.com/radical-collaboration/ROME.git && cd ROME
 pip install -e '.[test]'
 pip install 'rhapsody-py[dragon]'     # Dragon execution backend for asyncflow
 ```
@@ -74,27 +66,18 @@ Expect a clean run — every test here is CPU-only and needs no allocation.
 
 ## 4. Install IMPRESS
 
+Clone IMPRESS and run its own use-case setup script to create the base venv:
+
 ```bash
 cd $PROJ
-git clone --branch archive/ipdps_pdz_usecase --single-branch \
-  https://github.com/radical-collaboration/IMPRESS.git
+git clone https://github.com/radical-collaboration/IMPRESS.git
 cd IMPRESS
-pip install --no-deps -e .
-```
+pip install -e .
 
-`--no-deps` is deliberate: `pyproject.toml` declares `radical.pilot`, but it is
-only needed for the RADICAL execution backend. The examples and the full test
-suite run without it.
-
-The archived branch predates an asyncflow rename, so its examples need two
-lines changed — see `docs/impress.md` for the detail and the version table.
-Applied to a working copy:
-
-```bash
-sed -i 's/ConcurrentExecutionBackend/LocalExecutionBackend/g' \
-  examples/dummy.py examples/dummy_adaptive.py
-python -m pytest -q          # 19 passed
-python examples/dummy.py     # 3 pipelines, clean exit
+# use-case-specific setup (creates the venv and installs tool deps):
+bash examples/protein_binding/delta_env_setup.sh      # protein binding
+# or
+bash examples/small_molecule_binding/delta_env_setup.sh  # small molecule binding
 ```
 
 ---
@@ -116,10 +99,16 @@ dragon -s tests/dragon/test_namespace_dragon.py && dragon-cleanup-deprecated
 ```
 ```
 ok    single-key round trip
+ok    missing key returns default
 ok    dict records survive pickling
 ok    prefix scan is namespace-scoped
+ok    delete and pop
 ok    drain claims exactly once
-...
+ok    increment counter
+ok    model version defaults to 0
+ok    host workflow keys untouched
+ok    Event set/clear/is_set
+
 all DDict/Event checks passed
 ```
 
@@ -130,9 +119,16 @@ dragon -s tests/dragon/test_manager_dragon.py && dragon-cleanup-deprecated
 ```
 ```
 ok    every request answered exactly once
+ok    work spread over replicas
+ok    outputs are distinct
 ok    concurrent writers lose nothing
+HH:MM:SS.sss [INFO] [ROME-TRAINER] submitting training round 1 (100 designs, trainer dummy) -> v1
+HH:MM:SS.sss [INFO] [ROME-MODEL]   published v1 (100 designs) -> /tmp/.../dummy/v1
 ok    training fired and published
 ok    streams swapped onto the checkpoint
+ok    host workflow keys untouched
+HH:MM:SS.sss [INFO] [ROME-MANAGER] stopping — corpus 100, 1 round completed, model v1
+
 ROME works on Dragon
 ```
 
@@ -180,9 +176,9 @@ the driver process. For a real allocation you want tasks placed on nodes, which
 is `rhapsody`'s Dragon backend:
 
 ```python
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
-backend = DragonExecutionBackendV3({
+backend = DragonExecutionBackend(batch_kwargs={
     "num_nodes": 2,                     # defaults to the whole allocation
     "results_ddict_mem": 4 * 1024**3,   # raise for large returns / many tasks
 })
@@ -225,7 +221,7 @@ anything, which is why the bug was invisible there.
 
 `StreamTask.__getstate__` now drops driver-only attributes, so the body pickles
 whenever the backend gets round to it. With that fix all the stream checks pass
-on `DragonExecutionBackendV3`: every request answered exactly once, work spread
+on `DragonExecutionBackend`: every request answered exactly once, work spread
 across replicas, distinct outputs, and streams swapping onto a new checkpoint.
 
 **Budget one task slot per stream, plus one for training.** This is the thing to
@@ -270,8 +266,9 @@ export IMPRESS_USECASE=protein_binding        # or small_molecule_binding
 bash submit.sh
 ```
 
-Logs land in `protein_binding/logs/impress_<jobid>.out`. See `README.md` in the
-same directory for the full list of env vars and their defaults.
+Logs land in `<use_case>/logs/impress_<jobid>.out` (relative to where you run
+`submit.sh` from). See `README.md` in the same directory for the full list of
+env vars and their defaults.
 
 For a quick smoke test before committing to a long run, start with 1 pipeline and
 a low `ROME_MIN_SAMPLES` to confirm the loop closes:
@@ -300,8 +297,8 @@ delivery. The following must be in place before submitting:
 `delta_gpu_run.sh` exports all of these with their defaults and prints them at
 job start. Any that differ from the defaults can be overridden before `submit.sh`.
 
-The trainer fine-tunes the **original `dauparas/ProteinMPNN`** — the same
-weights IMPRESS runs — via `ProteinMPNNConfig(mpnn_repo=...)`. With
+The trainer fine-tunes the **original ProteinMPNN weights** at `$MPNN_PATH` —
+the same weights IMPRESS runs — via `ProteinMPNNConfig(mpnn_repo=...)`. With
 `publish_into_repo=True` (the default) it writes the new weights into
 `{mpnn_repo}/vanilla_model_weights/{model_name}.pt`, so the next MPNN pass picks
 them up with no change to the IMPRESS pipeline scripts. See

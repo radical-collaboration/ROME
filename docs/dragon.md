@@ -297,7 +297,7 @@ How "on disk" is detected differs by task type:
   real checkpoint path, so the trainer waits the full grace for the backend to
   deliver it before falling back to the output directory.
 
-With that in place the whole loop passes on `DragonExecutionBackendV3`:
+With that in place the whole loop passes on `DragonExecutionBackend`:
 
 ```
 ok    every request answered exactly once

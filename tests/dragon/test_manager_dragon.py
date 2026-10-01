@@ -89,12 +89,15 @@ async def settle(predicate, timeout=60.0, interval=0.25):
 async def run():
     from dragon.data.ddict import DDict
     from radical.asyncflow import WorkflowEngine
-    from rhapsody.backends import DragonExecutionBackendV3
+    try:
+        from rhapsody.backends import DragonExecutionBackend
+    except ImportError:
+        from rhapsody.backends import DragonExecutionBackendV3 as DragonExecutionBackend
 
     import rome
     from rome.dummy import DummyTrainer, dummy_infer, dummy_load
 
-    backend = await DragonExecutionBackendV3(
+    backend = await DragonExecutionBackend(
         {"results_ddict_mem": int(os.environ.get("ROME_RESULTS_MEM", 512 * 1024 ** 2))}
     )
     flow = await WorkflowEngine.create(backend=backend)
