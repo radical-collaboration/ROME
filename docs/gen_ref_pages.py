@@ -25,7 +25,7 @@ ROOT = Path(__file__).parent.parent
 PACKAGES = [(ROOT, ROOT / "rome")]
 
 #: Individual modules outside the framework package that are still public API.
-EXTRA_MODULES = [(ROOT, ROOT / "examples" / "impress_r" / "mpnn.py")]
+EXTRA_MODULES = [(ROOT, ROOT / "examples" / "impress_r" / "protein_binding" / "mpnn_trainer.py")]
 
 #: Private modules — documented nowhere, since they are not API.
 SKIP_STEMS = {"_logging"}
