@@ -7,8 +7,8 @@ state on a cluster.
 ## From a checkout
 
 ```bash
-git clone https://github.com/iznoanygod/rome.git
-cd rome
+git clone https://github.com/radical-collaboration/ROME.git
+cd ROME
 pip install -e .
 ```
 
@@ -20,7 +20,7 @@ This pulls in the framework and its trainers:
 | `rhapsody-py[radical_pilot]` | Execution backends — RADICAL-Pilot for HPC. |
 | `rhapsody-py[dragon]` | The Dragon execution backend (Python 3.10–3.12 only). |
 | `torch`, `transformers`, `peft`, `trl`, `datasets` | The built-in LLM/GRPO trainer. |
-| `numpy`, `pandas`, `pyarrow` | Dataset assembly, including the ProteinMPNN trainer's parquet shard. |
+| `numpy`, `pandas` | Dataset assembly for the ProteinMPNN trainer's manifest. |
 
 !!! note "Heavy imports stay out of the driver process"
 
@@ -130,11 +130,11 @@ scaling limit.
 
 ## IMPRESS
 
-The IMPRESS-R integration needs IMPRESS installed from the
-`archive/ipdps_pdz_usecase` branch, plus a `dauparas/ProteinMPNN` checkout for
-the trainer to fine-tune. Neither is a ROME dependency — ROME is workflow
-agnostic, and the ProteinMPNN trainer ships with the example rather than with
-the framework. See [Running IMPRESS](impress.md).
+The IMPRESS-R integration needs IMPRESS installed, plus a `dauparas/ProteinMPNN`
+checkout for the trainer to fine-tune. Neither is a ROME dependency — ROME is
+workflow agnostic, and the ProteinMPNN trainer ships with the example rather
+than with the framework. See [IMPRESS-R](examples/impress-r.md) and
+[Setting up on Delta](delta.md).
 
 ## Checking the install
 

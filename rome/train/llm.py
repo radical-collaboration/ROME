@@ -136,7 +136,7 @@ class GRPOConfig:
             adam_beta1=0.9,
             adam_beta2=0.99,
             weight_decay=0.01,
-            warmup_ratio=0.1,
+            warmup_steps=50,
             lr_scheduler_type="cosine",
             logging_steps=1,
             num_train_epochs=self.num_epochs,
@@ -282,7 +282,7 @@ class SFTConfig:
         args = dict(
             output_dir=output_dir,
             learning_rate=self.learning_rate,
-            warmup_ratio=0.1,
+            warmup_steps=50,
             lr_scheduler_type="cosine",
             logging_steps=1,
             num_train_epochs=self.num_epochs,
@@ -418,7 +418,7 @@ def load_model(model_config: ModelConfig):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_config.resolved_model_name(),
-        dtype=model_config.dtype,
+        torch_dtype=model_config.dtype,
         device_map=model_config.device_map,
     )
 

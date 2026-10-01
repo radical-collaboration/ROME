@@ -38,11 +38,11 @@ without the workflow's involvement.
 
 !!! tip "Start from the smallest version"
 
-    `examples/impress_r/dummy_adaptive_rome.py` is IMPRESS's own dummy adaptive
-    example with exactly those two lines added inside `adaptive_fn`, and a
-    `DummyTrainer` running rounds on its own once enough designs arrive. It is
-    the shortest complete demonstration of what adoption looks like against a
-    real host workflow.
+    `examples/agnostic/impress_r.py` is the shortest complete demonstration
+    of what adoption looks like — four ROME calls against a stand-in pipeline,
+    no IMPRESS dependency needed. For the full IMPRESS integration see
+    `tests/unit/test_impress_r_hooks.py` and
+    `examples/impress_r/protein_binding/run_protein_binding_rome.py`.
 
 ## Sharing the workflow engine
 
@@ -74,10 +74,10 @@ the host's tasks.
     process, so the model's CUDA context stays resident for the whole campaign
     instead of being freed when the round ends.
 
-    Pass a process-based backend — `DragonExecutionBackendV3` on Delta, or a
+    Pass a process-based backend — `DragonExecutionBackend` on Delta, or a
     `ConcurrentExecutionBackend(ProcessPoolExecutor())` — so each round runs in a
     task process that releases its VRAM on exit. See
-    `examples/impress_r/run_protein_binding_rome.py`, and
+    `examples/impress_r/protein_binding/run_protein_binding_rome.py`, and
     [Execution](../design/execution.md).
 
 ## Sharing the dictionary

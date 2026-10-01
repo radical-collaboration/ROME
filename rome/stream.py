@@ -372,12 +372,17 @@ class StreamTask:
             log.info("%s[%d] reloaded weights -> v%d (%s)",
                      self.config.name, self.index, self.local_version,
                      os.path.basename(path) if path else "no checkpoint")
-            return True
-        finally:
             # Cleared last, so a waiter in reload_model() only unblocks once the
             # new weights are actually in memory.
             self.reload_event.clear()
             self.status = StreamStatus.RUNNING
+            return True
+        except Exception:
+            # Leave status=FAILED so waiters in reload_model() don't incorrectly
+            # assume the reload succeeded.
+            self.status = StreamStatus.FAILED
+            self.reload_event.clear()
+            raise
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (

@@ -22,87 +22,44 @@ flowchart LR
 ```
 
 Four examples, in order of how much of the real campaign they involve. The
-background — installing IMPRESS from the `archive/ipdps_pdz_usecase` branch, the
-one incompatibility, what was verified — is in
-[Running IMPRESS](../impress.md). The trainer itself is in
-[Fine-tuning ProteinMPNN](../proteinmpnn_training.md).
-
-## The smallest integration
-
-`examples/impress_r/dummy_adaptive_rome.py` — **start here.**
-
-IMPRESS's own `examples/dummy_adaptive.py` — the minimal adaptive pipeline,
-`sequence_analysis → fitness_evaluation → [adaptive step] → optimization_step`,
-with random child-pipeline spawning — with **two lines of ROME** added inside
-the adaptive function:
-
-```python
-manager.add_training_data(...)     # this generation's designs
-manager.get_current_model()        # the improved model, if any
-```
-
-Nothing else changes. ROME's training manager watches the corpus those
-contributions build and, once `min_samples` designs have arrived, runs a round on
-its own — here the `DummyTrainer`. The next generation to call
-`get_current_model` picks it up. **The pipeline code never schedules training and
-never blocks on it.**
-
-To make the loop visible with no real model in it, `fitness_evaluation` produces
-better designs as the published model version climbs, so a child generation
-running a freshly trained checkpoint scores higher than its parent.
-
-```bash
-dragon -s examples/impress_r/dummy_adaptive_rome.py
-```
+trainer deep-dive is in [Fine-tuning ProteinMPNN](../proteinmpnn_training.md).
 
 ## The four calls against a stand-in pipeline
 
-`examples/agnostic/impress_r.py`
+`examples/agnostic/impress_r.py` — **start here if you don't have IMPRESS installed.**
 
-The same shape without needing IMPRESS installed: `run_impress_cycle` stands in
-for the pipeline and runs unchanged, and ROME is four calls — build a manager,
-contribute, collect, stop.
+`run_impress_cycle` stands in for the pipeline and runs unchanged. ROME is four
+calls — build a manager, contribute, collect, stop — with no IMPRESS dependency.
 
 ```bash
 dragon examples/agnostic/impress_r.py
 ```
 
-Read this one if you want the adoption pattern without the IMPRESS specifics in
-the way.
+## The integration tests
 
-## The real seam, with executables stubbed
-
-`examples/impress_r/adaptive_rome.py`
-
-Modelled directly on IMPRESS's protein-binding use case. The pipeline structure,
-the pass loop, the score CSV and the degradation criterion are IMPRESS's own; only
-the AlphaFold and ProteinMPNN *executables* are stubbed, so the whole thing runs
-on a laptop.
-
-The point is the seam. `adaptive_decision(pipeline)` runs after the
-pLDDT-extraction task of every pass, reads
-`af_stats_{name}_pass_{n}.csv`, and decides which designs regressed. That is the
-natural — and only — place where a campaign both *has* fresh scored designs and is
-*between* passes, so it is where both halves of ROME belong.
-
-`run()` never mentions ROME, and the degradation logic that spawns child
-pipelines is IMPRESS's own, untouched.
+`tests/unit/test_impress_r_hooks.py` and `tests/integration/test_impress_r.py`
+cover the seam between ROME and a real `ImpressManager`/`ImpressBasePipeline`
+with stubbed executables. These skip automatically when IMPRESS is absent and run
+on any machine with IMPRESS installed — no GPU, no allocation:
 
 ```bash
-dragon -s examples/impress_r/adaptive_rome.py
+pytest tests/unit/test_impress_r_hooks.py tests/integration/test_impress_r.py -v
 ```
 
-The hook wiring is covered offline by `tests/unit/test_impress_r_hooks.py`.
+The key invariant they verify: `adaptive_decision(pipeline)` is the seam. It runs
+after the pLDDT-extraction task of every pass — the one point where the campaign
+both *has* fresh scored designs and is *between* passes. `run()` never mentions
+ROME, and the degradation logic that spawns child pipelines is IMPRESS's own,
+untouched.
 
 ## The real campaign
 
-`examples/impress_r/protein_binding_rome.py` +
-`examples/impress_r/run_protein_binding_rome.py`
+`examples/impress_r/protein_binding/run_protein_binding_rome.py`
 
-IMPRESS's own `run_protein_binding.py` driving the real `ProteinBindingPipeline` —
+IMPRESS's own protein-binding pipeline —
 MPNN → AlphaFold → pLDDT extraction, the migration logic, all of it — with the two
-ROME calls added inside `adaptive_decision` and nothing else changed. Run it
-from the usecase directory on Delta.
+ROME calls added inside `adaptive_decision` and nothing else changed. Submit it
+on Delta via `bash submit.sh` (see [Setting up on Delta](../delta.md)).
 
 ### Hook 1: contribute
 
@@ -181,7 +138,26 @@ itself. And the campaign data available was produced with Boltz while the target
 branch runs AlphaFold2-multimer, and the two predictors do not share a confidence
 scale. A fraction needs no scale. See
 [Percentile sampling](../guide/data.md#percentile-sampling-when-you-dont-know-your-thresholds)
-and [what the campaign data says](../impress.md).
+and [what data a round needs](../proteinmpnn_training.md#3-what-data-a-round-needs).
+
+### Other pipeline wiring details
+
+Two IMPRESS-specific patterns that fall out of the real integration:
+
+* **`auto_register_task(local_task=True)`** leaves the decorated function as a
+  plain Python call rather than wrapping it as an executable task. Any step that
+  must run in-process (reading shared state, spawning child pipelines) takes this
+  form.
+* **`PipelineSetup(kwargs={...})`** passes arbitrary configuration through to
+  the pipeline constructor. The example uses it to thread `base_path` through
+  without modifying the pipeline class.
+* **`post_exec` only runs on `RadicalExecutionBackend`** — silently ignored on
+  `LocalExecutionBackend` and the Dragon backend (the only options on current
+  asyncflow). The archive `run_protein_binding.py` used `post_exec` to copy
+  AlphaFold's ranked model into `best_models/`; if that step is absent, AlphaFold
+  fills `dimer_models/` but `best_models/` stays empty and the pLDDT extractor
+  writes a header-only CSV. `run_protein_binding_rome.py` avoids this by folding
+  the copies into the AlphaFold task's own shell command.
 
 ## Seeing it in the log
 
@@ -197,22 +173,29 @@ readably in one campaign log:
 
 See [Logging](../guide/logging.md).
 
-## Campaign tooling
+## Campaign structure
 
-`examples/impress_r/` also ships three things you run by hand around a campaign
-rather than import — they are operational tools, not framework:
+`examples/impress_r/` is organised by use case:
 
-| Script | When |
-| --- | --- |
-| `populate_best_models.py` | **Whenever IMPRESS runs off RadicalExecutionBackend.** Its `post_exec` copies never happen there, so `best_models/` stays empty and the corpus silently receives nothing. |
-| `af_stats_watch.py` | While a campaign runs, to watch its confidence distribution. |
-| `impress_campaign_probe.sh` | Once, against a finished campaign, to answer wiring questions. |
-
-[Campaign helper scripts](../impress.md#campaign-helper-scripts) covers what each
-one does and why the first one matters most.
+```
+impress_r/
+  submit.sh                              — launch wrapper (sets --job-name for log routing)
+  delta_gpu_run.sh                       — unified SLURM batch script
+  delta_env_setup.sh                     — unified ROME addon installer
+  README.md                              — env vars, quick commands, log prefixes
+  skill.md                               — reward functions, filters, checkpoint guide
+  protein_binding/
+    run_protein_binding_rome.py          — entry point
+    mpnn_trainer.py                      — ProteinMPNNTrainer + pb_reward_fn
+    mpnn_train_wrapper.py                — fine-tune CLI (dragon-free, runnable standalone)
+    mpnn_stream.py                       — inference stream with hot-swap weights
+  small_molecule_binding/
+    run_smb_rome.py                      — entry point
+    ligandmpnn_trainer.py                — LigandMPNNTrainer + smb_reward_fn
+```
 
 ## API reference
 
-* [`examples.impress_r.mpnn`](../api/examples/impress_r/mpnn.md) —
+* [`examples.impress_r.protein_binding.mpnn_trainer`](../api/examples/impress_r/protein_binding/mpnn_trainer.md) —
   `ProteinMPNNTrainer`, `ProteinMPNNConfig`, `percentile_sampler`,
   `impress_corpus_filter`, `build_chain_designation`

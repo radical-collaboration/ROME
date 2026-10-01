@@ -3,13 +3,6 @@
 End-to-end: environment, install, a ladder of smoke tests that each prove one
 more layer, then running an IMPRESS campaign with ROME attached.
 
-**What has actually been verified, and where.** Everything below was run on a
-single-node Linux box with Dragon 0.14.1 — not on Delta. The Delta-specific
-parts (module names, partitions, account, `sbatch` shape) are marked where they
-need checking against your allocation. The software parts — Dragon, asyncflow,
-ROME, IMPRESS, and the two of them together — were run and are reported with
-their real output.
-
 ---
 
 ## 1. Environment
@@ -24,7 +17,7 @@ export BULK=/work/hdd/bdyk/$USER
 mkdir -p $PROJ $BULK
 ```
 
-Python 3.11 is what everything below was verified against. Dragon publishes
+Python 3.12 is what everything below was verified against. Dragon publishes
 wheels per CPython version, so the interpreter version is not a free choice —
 check what `dragonhpc` has for your Python before committing to one.
 
@@ -58,8 +51,7 @@ Two things to know from the start:
 
 ```bash
 cd $PROJ
-git clone <your ROME remote> ROME && cd ROME
-git checkout claude/rome-agnostic-implementation-xi5bz4
+git clone https://github.com/radical-collaboration/ROME.git && cd ROME
 pip install -e '.[test]'
 pip install 'rhapsody-py[dragon]'     # Dragon execution backend for asyncflow
 ```
@@ -74,27 +66,18 @@ Expect a clean run — every test here is CPU-only and needs no allocation.
 
 ## 4. Install IMPRESS
 
+Clone IMPRESS and run its own use-case setup script to create the base venv:
+
 ```bash
 cd $PROJ
-git clone --branch archive/ipdps_pdz_usecase --single-branch \
-  https://github.com/radical-collaboration/IMPRESS.git
+git clone https://github.com/radical-collaboration/IMPRESS.git
 cd IMPRESS
-pip install --no-deps -e .
-```
+pip install -e .
 
-`--no-deps` is deliberate: `pyproject.toml` declares `radical.pilot`, but it is
-only needed for the RADICAL execution backend. The examples and the full test
-suite run without it.
-
-The archived branch predates an asyncflow rename, so its examples need two
-lines changed — see `docs/impress.md` for the detail and the version table.
-Applied to a working copy:
-
-```bash
-sed -i 's/ConcurrentExecutionBackend/LocalExecutionBackend/g' \
-  examples/dummy.py examples/dummy_adaptive.py
-python -m pytest -q          # 19 passed
-python examples/dummy.py     # 3 pipelines, clean exit
+# use-case-specific setup (creates the venv and installs tool deps):
+bash examples/protein_binding/delta_env_setup.sh      # protein binding
+# or
+bash examples/small_molecule_binding/delta_env_setup.sh  # small molecule binding
 ```
 
 ---
@@ -116,10 +99,16 @@ dragon -s tests/dragon/test_namespace_dragon.py && dragon-cleanup-deprecated
 ```
 ```
 ok    single-key round trip
+ok    missing key returns default
 ok    dict records survive pickling
 ok    prefix scan is namespace-scoped
+ok    delete and pop
 ok    drain claims exactly once
-...
+ok    increment counter
+ok    model version defaults to 0
+ok    host workflow keys untouched
+ok    Event set/clear/is_set
+
 all DDict/Event checks passed
 ```
 
@@ -130,9 +119,16 @@ dragon -s tests/dragon/test_manager_dragon.py && dragon-cleanup-deprecated
 ```
 ```
 ok    every request answered exactly once
+ok    work spread over replicas
+ok    outputs are distinct
 ok    concurrent writers lose nothing
+HH:MM:SS.sss [INFO] [ROME-TRAINER] submitting training round 1 (100 designs, trainer dummy) -> v1
+HH:MM:SS.sss [INFO] [ROME-MODEL]   published v1 (100 designs) -> /tmp/.../dummy/v1
 ok    training fired and published
 ok    streams swapped onto the checkpoint
+ok    host workflow keys untouched
+HH:MM:SS.sss [INFO] [ROME-MANAGER] stopping — corpus 100, 1 round completed, model v1
+
 ROME works on Dragon
 ```
 
@@ -159,21 +155,17 @@ result is published *from disk* after a short grace because a stream service tas
 blocks rhapsody's result delivery. On a real multi-node allocation raise the
 replica count and leave the fallback at its minutes-scale default.
 
-**(d) IMPRESS-R — real IMPRESS pipeline, real ROME, stubbed executables.**
+**(d) IMPRESS-R — real IMPRESS pipeline, real ROME.**
+
+With IMPRESS installed (§4), run the integration tests directly:
 
 ```bash
-dragon -s examples/impress_r/adaptive_rome.py && dragon-cleanup-deprecated
-```
-```
-[PIPELINE-P1] pass 1 | mpnn=proteinmpnn_v_48_020.pt
-[PIPELINE-P1] corpus 4 (+4 this pass) | WAITING
-[PIPELINE-P1] ROME published v1
-[PIPELINE-P1] pass 3 | mpnn=.../checkpoints/dummy/v1      <-- campaign swapped
-...
-[PIPELINE-P1] ROME published v7
+pytest tests/unit/test_impress_r_hooks.py tests/integration/test_impress_r.py -v
 ```
 
-At this point everything but the science executables is proven on your machine.
+These skip automatically if IMPRESS or rhapsody are absent, and pass on any
+machine — no GPU, no allocation. At this point the seam between ROME and IMPRESS
+is proven. The next step (§7) runs the full campaign on a real allocation.
 
 ---
 
@@ -184,9 +176,9 @@ the driver process. For a real allocation you want tasks placed on nodes, which
 is `rhapsody`'s Dragon backend:
 
 ```python
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
-backend = DragonExecutionBackendV3({
+backend = DragonExecutionBackend(batch_kwargs={
     "num_nodes": 2,                     # defaults to the whole allocation
     "results_ddict_mem": 4 * 1024**3,   # raise for large returns / many tasks
 })
@@ -229,7 +221,7 @@ anything, which is why the bug was invisible there.
 
 `StreamTask.__getstate__` now drops driver-only attributes, so the body pickles
 whenever the backend gets round to it. With that fix all the stream checks pass
-on `DragonExecutionBackendV3`: every request answered exactly once, work spread
+on `DragonExecutionBackend`: every request answered exactly once, work spread
 across replicas, distinct outputs, and streams swapping onto a new checkpoint.
 
 **Budget one task slot per stream, plus one for training.** This is the thing to
@@ -260,81 +252,61 @@ placed — no error, just `STARTING` forever.
 
 ## 7. Running a campaign under Slurm
 
-Delta-specific values to confirm first — check with `sinfo` and your allocation:
+`examples/impress_r/submit.sh` is the entry point. It sets `--job-name` so SLURM
+routes logs to `<use_case>/logs/` automatically and creates the directory before
+submitting `delta_gpu_run.sh`:
 
 ```bash
-sinfo -s                      # partitions, e.g. gpuA100x4
-accounts                      # your charge account
+cd $PROJ/ROME/examples/impress_r
+
+export SBATCH_ACCOUNT=<your-account>          # or set #SBATCH --account in delta_gpu_run.sh
+export WORK_DIR=/work/nvme/bdyk/$USER
+export IMPRESS_USECASE=protein_binding        # or small_molecule_binding
+
+bash submit.sh
 ```
+
+Logs land in `<use_case>/logs/impress_<jobid>.out` (relative to where you run
+`submit.sh` from). See `README.md` in the same directory for the full list of
+env vars and their defaults.
+
+For a quick smoke test before committing to a long run, start with 1 pipeline and
+a low `ROME_MIN_SAMPLES` to confirm the loop closes:
 
 ```bash
-#!/bin/bash
-#SBATCH --job-name=impress-r
-#SBATCH --account=<your-account>
-#SBATCH --partition=<gpu-partition>     # e.g. gpuA100x4
-#SBATCH --nodes=2
-#SBATCH --gpus-per-node=4
-#SBATCH --time=04:00:00
-#SBATCH --output=impress-r-%j.out
-
-set -euo pipefail
-export PROJ=/work/nvme/bdyk/$USER
-source $PROJ/venv-rome/bin/activate
-cd $PROJ/ROME
-
-# Keep campaign state off the login filesystem.
-export ROME_CHECKPOINTS=$PROJ/checkpoints
-export IMPRESS_BASE=/work/hdd/bdyk/$USER/campaign
-mkdir -p "$ROME_CHECKPOINTS" "$IMPRESS_BASE"
-
-dragon -s examples/impress_r/adaptive_rome.py
-rc=$?
-dragon-cleanup-deprecated || true       # always, including after a failure
-exit $rc
+IMPRESS_N_PIPELINES=1 ROME_MIN_SAMPLES=2 bash submit.sh
 ```
 
-Start with `--nodes=1` and the stubbed example to confirm Dragon comes up under
-Slurm at all, then scale.
+Check `sinfo -s` and `accounts` first to confirm the partition name and account
+for your allocation.
 
-## 8. Swapping in the real science
+## 8. What the campaign script needs
 
-The example stubs three things. Replacing them is where the remaining work is:
+`examples/impress_r/protein_binding/run_protein_binding_rome.py` is the real
+production script — no stubs. It runs `ProteinMPNNTrainer` directly and wraps
+IMPRESS's own `adaptive_decision` with two hooks: corpus staging and ROME model
+delivery. The following must be in place before submitting:
 
-| Stub in the example | Real thing |
-|---|---|
-| `s1_mpnn` echo | `mpnn_wrapper.py` from IMPRESS's `protien_binding_usecase` |
-| `s4_alphafold` echo | `af2_multimer_reduced.sh` |
-| `s5_extract` writing a CSV | `plddt_extract_pipeline.py` |
-| `DummyTrainer` | `ProteinMPNNTrainer(ProteinMPNNConfig(...))` |
+| Requirement | Env var | Default |
+|---|---|---|
+| ProteinMPNN checkout (`dauparas/ProteinMPNN`) | `MPNN_PATH` | `$WORK_DIR/ProteinMPNN` |
+| IMPRESS checkout | `IMPRESS_DIR` | `$WORK_DIR/IMPRESS` |
+| Boltz venv | `BOLTZ_VENV` | `$WORK_DIR/ve/boltz` |
+| Input PDB directory (parent of `prod_in/`) | `IMPRESS_BASE_DIR` | `$WORK_DIR/IMPRESS_inputs` |
 
-The `adaptive_fn` reads the real CSV schema (`ID, avg_plddt, ptm, avg_pae`) and
-the real structure path (`pipeline.output_path_af/{design}.pdb`), but it does
-need one change before a production run: **that path is keyed by pipeline, not
-by pass, so the next pass overwrites it and `finalize()` deletes it outright.**
-The contribution step has to copy the prediction to a pass-qualified location
-before recording it, or the corpus points at files that no longer hold the
-structure that was scored. See `docs/impress.md`.
+`delta_gpu_run.sh` exports all of these with their defaults and prints them at
+job start. Any that differ from the defaults can be overridden before `submit.sh`.
 
-Do not reuse `impress_corpus_filter()`'s defaults either — see §9.
+The trainer fine-tunes the **original ProteinMPNN weights** at `$MPNN_PATH` —
+the same weights IMPRESS runs — via `ProteinMPNNConfig(mpnn_repo=...)`. With
+`publish_into_repo=True` (the default) it writes the new weights into
+`{mpnn_repo}/vanilla_model_weights/{model_name}.pt`, so the next MPNN pass picks
+them up with no change to the IMPRESS pipeline scripts. See
+`docs/proteinmpnn_training.md` for the data prep and checkpoint format.
 
-For the trainer, read `docs/proteinmpnn_training.md` first. It fine-tunes the
-**original `dauparas/ProteinMPNN`** — the same implementation IMPRESS runs —
-pointed at your ProteinMPNN checkout via `ProteinMPNNConfig(mpnn_repo=...)`, and
-with `publish_into_repo=True` writes the new weights into
-`{mpnn_repo}/vanilla_model_weights/{model_name}.pt` so the next pass runs them
-with no wrapper change. The data prep, chain designation and checkpoint format
-are tested; the torch fine-tuning loop needs the checkout and a GPU and has not
-been run in CI, so validate it there (or start with `train_func`).
-
-Two open items to settle before a production run, both noted in
-`docs/impress.md` and `docs/proteinmpnn_training.md`:
-
-* IMPRESS's real `run_protein_binding.py` uses `RadicalExecutionBackend`, which
-  exists only in asyncflow 0.2.0. On current asyncflow, use the Dragon backend
-  above.
-* Fine-tuning only on self-generated designs will drift the model, and the
-  standard mitigation — mixing in a slice of the original PDB training
-  distribution — needs a held-out set the campaign does not provide.
+One open item: fine-tuning only on self-generated designs will drift the model.
+The standard mitigation — mixing in a slice of the original PDB training
+distribution — needs a held-out set the campaign does not provide.
 
 ## 9. Selecting designs without knowing your thresholds yet
 
@@ -351,7 +323,7 @@ and the first needs nothing up front.
 **Rank instead of threshold (recommended for a first run).**
 
 ```python
-from examples.impress_r.mpnn import percentile_sampler
+from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
 rome.DataConfig(
     min_samples=24,
@@ -372,23 +344,18 @@ and selection are different jobs; this does the selecting.
 
 **Watch the distribution directly.**
 
-```bash
-python examples/impress_r/af_stats_watch.py $IMPRESS_BASE --follow
-```
-
-Reads every `af_stats_*.csv` written so far and prints the live distribution
-plus what each candidate threshold triple would admit. Read-only, safe against a
-running job. Once a few passes have landed, pick the row admitting roughly a
-third and pass it explicitly:
+The `af_stats_*.csv` files written by the pipeline accumulate in
+`$IMPRESS_OUTPUT_DIR`. Once a few passes have landed, inspect them to choose
+fixed thresholds:
 
 ```python
 filter_func=impress_corpus_filter(min_pLDDT=..., min_pTM=..., max_pAE=...)
 ```
 
-One trap it will show you: setting each of the three clauses at its 33rd
-percentile does **not** admit a third. On measured data it admitted 6%, because
-the three scores correlate. If you do choose fixed thresholds, verify the joint
-admission rate rather than reasoning clause by clause.
+One trap: setting each of the three clauses at its 33rd percentile does **not**
+admit a third. On measured data it admitted 6%, because the three scores
+correlate. Verify the joint admission rate rather than reasoning clause by
+clause.
 
 Whichever route, `sampling="top_k"` with `score_key="pLDDT"` is worth avoiding:
 pLDDT never fell below 88 across 176 measured records, so ranking on it is close

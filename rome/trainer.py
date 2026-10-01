@@ -170,6 +170,10 @@ class TrainerConfig:
     stop_on_failure : bool
         Move to ``FAILED`` and end the auto-train loop when a round raises.
         When ``False`` (default) the failure is recorded and polling continues.
+    max_consecutive_failures : Optional[int]
+        Stop the auto-train loop after this many consecutive failed rounds.
+        ``None`` (default) retries indefinitely. Resets to zero on a
+        successful round.
     """
 
     trainer: Any = None
@@ -182,6 +186,7 @@ class TrainerConfig:
     train_kwargs: Dict[str, Any] = field(default_factory=dict)
     on_checkpoint: Optional[Callable[[str, int], None]] = None
     stop_on_failure: bool = False
+    max_consecutive_failures: Optional[int] = None
 
 
 class Trainer:
@@ -255,6 +260,7 @@ class Trainer:
     async def _trainer_listener(self) -> None:
         """Poll the corpus and fire a training round when one becomes possible."""
         self._status = self._idle_status()
+        consecutive_failures = 0
         while not self.stop_event.is_set():
             if self._rounds_exhausted():
                 self._status = TrainerStatus.TRAINING_COMPLETE
@@ -265,11 +271,19 @@ class Trainer:
                 continue
             try:
                 await self._run_round()
+                consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - surfaced via status
                 self._record_failure(exc)
-                if self.config.stop_on_failure:
+                consecutive_failures += 1
+                cap = self.config.max_consecutive_failures
+                if self.config.stop_on_failure or (cap is not None and consecutive_failures >= cap):
+                    log.error(
+                        "stopping auto-train loop after %d consecutive failure%s",
+                        consecutive_failures,
+                        "" if consecutive_failures == 1 else "s",
+                    )
                     return
                 await asyncio.sleep(self.config.poll_interval)
         self._status = TrainerStatus.STOPPED
@@ -589,8 +603,8 @@ class Trainer:
         self._last_error = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )
-        log.error("training round failed: %s: %s",
-                  type(exc).__name__, exc)
+        log.error("training round failed: %s: %s\n%s",
+                  type(exc).__name__, exc, self._last_error.rstrip())
         self._status = (
             TrainerStatus.FAILED if self.config.stop_on_failure else self._idle_status()
         )

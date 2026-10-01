@@ -35,9 +35,12 @@ async def forever(ser, marker):
 async def main():
     from dragon.data.ddict import DDict
     from radical.asyncflow import WorkflowEngine
-    from rhapsody.backends import DragonExecutionBackendV3
+    try:
+        from rhapsody.backends import DragonExecutionBackend
+    except ImportError:
+        from rhapsody.backends import DragonExecutionBackendV3 as DragonExecutionBackend
 
-    backend = await DragonExecutionBackendV3({"results_ddict_mem": 256 * 1024 ** 2})
+    backend = await DragonExecutionBackend({"results_ddict_mem": 256 * 1024 ** 2})
     flow = await WorkflowEngine.create(backend=backend)
     d = DDict(managers_per_node=1, n_nodes=1, total_mem=256 * 1024 ** 2)
     ser = d.serialize()

@@ -25,9 +25,9 @@ their whole API on one object. Adoption is `Manager(...)`, `start()`,
 | --- | --- |
 | [`rome.train.base`](rome/train/base.md) | `TrainTask`, `FunctionTrainer` — the interface every training algorithm implements. |
 | [`rome.train.llm`](rome/train/llm.md) | `GRPOTrainer`, `GRPOConfig`, `ModelConfig`, `load_model`, `save_model`. |
-| [`examples.impress_r.mpnn`](examples/impress_r/mpnn.md) | `ProteinMPNNTrainer`, `ProteinMPNNConfig`, `percentile_sampler` — the IMPRESS-R integration. |
+| [`examples.impress_r.protein_binding.mpnn_trainer`](examples/impress_r/protein_binding/mpnn_trainer.md) | `ProteinMPNNTrainer`, `ProteinMPNNConfig`, `percentile_sampler` — the IMPRESS-R integration. |
 
-`examples.impress_r.mpnn` ships with the example rather than with the framework,
+`examples.impress_r.protein_binding.mpnn_trainer` ships with the example rather than with the framework,
 because ROME is workflow agnostic and the ProteinMPNN trainer is an IMPRESS-R
 integration. It is documented here because it is public API for anyone adopting
 IMPRESS-R.

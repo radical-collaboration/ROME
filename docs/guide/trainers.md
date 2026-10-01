@@ -179,7 +179,7 @@ individual knobs).
 stream's `load_func` should use `load_model` — that is how the stream and the
 trainer agree on what a checkpoint means.
 
-### `examples.impress_r.mpnn.ProteinMPNNTrainer`
+### `examples.impress_r.protein_binding.mpnn_trainer.ProteinMPNNTrainer`
 
 Fine-tunes the **original `dauparas/ProteinMPNN`** — the same implementation
 IMPRESS runs — on the campaign's dimers, scoring the designed chain with the
@@ -187,7 +187,7 @@ target peptide as context, and writes an original-format checkpoint that
 `protein_mpnn_run.py` loads.
 
 ```python
-from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer
+from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer
 
 trainer = ProteinMPNNTrainer(ProteinMPNNConfig(
     mpnn_repo="/path/to/dauparas/ProteinMPNN",
@@ -198,7 +198,7 @@ trainer = ProteinMPNNTrainer(ProteinMPNNConfig(
 It lives with the example rather than in `rome/` on purpose: it is an IMPRESS-R
 *integration*, and ROME is workflow agnostic. See
 [Fine-tuning ProteinMPNN](../proteinmpnn_training.md) and
-[the API reference](../api/examples/impress_r/mpnn.md).
+[the API reference](../api/examples/impress_r/protein_binding/mpnn_trainer.md).
 
 ### `rome.dummy.DummyTrainer`
 

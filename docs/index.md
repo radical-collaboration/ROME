@@ -20,7 +20,7 @@ already have, not a workflow you adopt:
 * adoption costs a handful of API calls — the host workflow's own code does not
   move.
 
-An [IMPRESS](impress.md) protein-design campaign adopts ROME by adding two
+An [IMPRESS-R](examples/impress-r.md) protein-design campaign adopts ROME by adding two
 lines inside its adaptive step. The campaign keeps running exactly as it did;
 mid-campaign, the model it designs with starts getting better.
 
@@ -59,18 +59,18 @@ flowchart LR
 
 ```python
 import rome
-from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer, percentile_sampler
+from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer, percentile_sampler
 
 manager = rome.Manager(
-    asyncflow,                                  # your existing WorkflowEngine
+    backend=backend,                            # execution backend ROME builds its engine on
     data_config=rome.DataConfig(
         min_samples=24,
         sample_func=percentile_sampler(0.33),   # train on the campaign's best third
     ),
     trainer_config=rome.TrainerConfig(
         trainer=ProteinMPNNTrainer(ProteinMPNNConfig(
-            mpnn_repo="/path/to/dauparas/ProteinMPNN",   # the repo IMPRESS runs
-            publish_into_repo=True,                      # so the next pass runs it
+            mpnn_repo=os.environ["MPNN_PATH"],   # the checkout IMPRESS runs
+            publish_into_repo=True,              # so the next pass runs it
         )),
     ),
 )
@@ -154,9 +154,7 @@ thing the [API reference](api/index.md) documents.
 
 Everything beside it is there to be read or run, not imported. `examples/` is
 adoption code you copy from, and `examples/impress_r/` carries everything
-specific to that campaign: the ProteinMPNN trainer, the pipeline seams, and three
-operational tools for running a campaign — one of which,
-`populate_best_models.py`, you will need whenever IMPRESS runs off
-RadicalExecutionBackend ([why](impress.md#campaign-helper-scripts)). `tests/`
-splits into a laptop suite and Dragon scripts the launcher runs
+specific to IMPRESS campaigns: the ProteinMPNN and LigandMPNN trainers, the
+pipeline seams, and the unified launchers for both use cases. `tests/` splits
+into a laptop suite and Dragon scripts the launcher runs
 ([what each covers](installation.md#tests)).
