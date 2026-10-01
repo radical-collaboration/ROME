@@ -418,7 +418,7 @@ def load_model(model_config: ModelConfig):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_config.resolved_model_name(),
-        dtype=model_config.dtype,
+        torch_dtype=model_config.dtype,
         device_map=model_config.device_map,
     )
 

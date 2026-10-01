@@ -787,6 +787,26 @@ def percentile_sampler(
     return _sample
 
 
+def pb_reward_fn(record: Dict[str, Any]) -> float:
+    """Per-sample training reward for protein binding designs.
+
+    Higher reward → more gradient for this sample in the fine-tuning round.
+
+    Metrics (all written by the ROME hook in run_protein_binding_rome.py):
+      pLDDT  0–100   higher = more confident structure prediction
+      pTM    0–1     higher = better global topology match
+      pAE    0–∞     lower  = better interface alignment error (cap at 30)
+
+    Weights reflect that interface quality (pAE) matters most for binding,
+    followed by fold confidence (pLDDT) and topology (pTM).  Tune via
+    ROME_REWARD_FN=mpnn_trainer:pb_reward_fn or point at a custom function.
+    """
+    plddt = float(record.get("pLDDT", 0.0))
+    ptm   = float(record.get("pTM",   0.0))
+    pae   = float(record.get("pAE",   30.0))
+    return (plddt / 100.0) * 0.4 + ptm * 0.3 + max(0.0, 1.0 - pae / 30.0) * 0.3
+
+
 __all__ = [
     "ProteinMPNNConfig",
     "ProteinMPNNTrainer",
@@ -799,6 +819,7 @@ __all__ = [
     "impress_corpus_filter",
     "percentile_sampler",
     "score_percentiles",
+    "pb_reward_fn",
     "DEFAULT_RANK_BY",
     "DEFAULT_DESIGN_CHAINS",
     "DEFAULT_CONTEXT_CHAINS",

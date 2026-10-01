@@ -213,6 +213,6 @@ one does and why the first one matters most.
 
 ## API reference
 
-* [`examples.impress_r.mpnn`](../api/examples/impress_r/mpnn.md) —
+* [`examples.impress_r.protein_binding.mpnn_trainer`](../api/examples/impress_r/protein_binding/mpnn_trainer.md) —
   `ProteinMPNNTrainer`, `ProteinMPNNConfig`, `percentile_sampler`,
   `impress_corpus_filter`, `build_chain_designation`

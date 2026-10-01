@@ -166,11 +166,11 @@ class DataManager:
         record.setdefault("model_version", self.model_version)
 
         if not self._accepts(record):
-            _log.debug("rejected design %s (filtered: %s)",
-                       record["uid"][:8], self._reject_reason(record))
+            _log.info("rejected design %s (filtered: %s)",
+                      record["uid"][:8], self._reject_reason(record))
             return None
         if self._is_duplicate(record):
-            _log.debug("rejected design %s (duplicate)", record["uid"][:8])
+            _log.info("rejected design %s (duplicate)", record["uid"][:8])
             return None
 
         self._records[record["uid"]] = record
