@@ -28,7 +28,7 @@ This trainer is an IMPRESS-R *integration*, not framework core — ROME is
 workflow-agnostic — so it lives with the example, beside the inference wrapper
 (``mpnn_wrapper.py``) it complements. Import it from here::
 
-    from examples.impress_r.mpnn import ProteinMPNNTrainer, ProteinMPNNConfig
+    from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNTrainer, ProteinMPNNConfig
 
 **Runs as a command, not a function.** Like IMPRESS — which submits
 ``mpnn_wrapper.py`` as a shell command rather than calling ProteinMPNN in the
@@ -64,7 +64,7 @@ from rome.train.base import TrainTask
 def _load_run_round():
     """Import ``run_round`` from the sibling ``mpnn_train_wrapper``.
 
-    Works whether this module was imported as ``examples.impress_r.mpnn`` (the
+    Works whether this module was imported as ``examples.impress_r.protein_binding.mpnn_trainer`` (the
     test/package path) or as a bare ``mpnn`` (a script run from inside the
     example directory): the wrapper sits next to this file, so its directory is
     put on ``sys.path`` and it is imported by name. Lazy — only the in-process
@@ -638,7 +638,7 @@ def score_percentiles(
     share a scale — so the only safe way to set one is to look at what *this*
     campaign is producing::
 
-        from examples.impress_r.mpnn import score_percentiles
+        from examples.impress_r.protein_binding.mpnn_trainer import score_percentiles
         print(score_percentiles(manager.data.get_records()))
 
     Returns ``{key: {"n", "min", "p10", "p25", "median", "p75", "p90", "max"}}``,

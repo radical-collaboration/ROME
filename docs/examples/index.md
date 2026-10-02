@@ -11,6 +11,7 @@ much of a real campaign they involve. Start at the top.
 | [`agnostic/llm_grpo_streams.py`](llm-grpo.md) | All three managers: generation and scoring as streams, GRPO training. | A GPU, TRL, a HF model. |
 | [`impress_r/adaptive_rome.py`](impress-r.md#the-real-seam-with-executables-stubbed) | The real campaign seam with the executables stubbed, so it runs anywhere. | IMPRESS. |
 | [`impress_r/protein_binding_rome.py`](impress-r.md#the-real-campaign) | The real campaign: MPNN → AlphaFold → pLDDT, fine-tuning ProteinMPNN mid-run. | Delta, IMPRESS, ProteinMPNN, AlphaFold. |
+| [`impress_r/interface_targeting/`](interface-targeting.md) | Improving something other than a model: the surrogate learns the target RFD3's backbone diffusion is conditioned on. | Delta, IMPRESS, itgt. |
 
 ## Running them
 
@@ -40,9 +41,9 @@ whole campaign. See [Execution](../design/execution.md#why-a-gpu-round-should-be
 ## Where the trainers live
 
 `rome.train.llm.GRPOTrainer` ships with the framework. `ProteinMPNNTrainer` does
-**not** — it lives in `examples/impress_r/mpnn.py`, because it is an IMPRESS-R
+**not** — it lives in `examples/impress_r/protein_binding/mpnn_trainer.py`, because it is an IMPRESS-R
 integration and ROME is workflow agnostic. Import it from there:
 
 ```python
-from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer
+from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer
 ```

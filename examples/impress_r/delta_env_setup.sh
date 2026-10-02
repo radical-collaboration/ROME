@@ -8,12 +8,14 @@
 #
 # Usage:
 #   export WORK_DIR=/work/nvme/bdyk/$USER
-#   export IMPRESS_USECASE=protein_binding   # or small_molecule_binding
+#   export IMPRESS_USECASE=protein_binding   # or small_molecule_binding,
+#                                            # or interface_targeting
 #   bash delta_env_setup.sh
 #
 # IMPRESS_USECASE selects the default venv:
 #   protein_binding      → $WORK_DIR/ve/impress   (IMPRESS's impress_A venv)
 #   small_molecule_binding → $WORK_DIR/ve/small_mol
+#   interface_targeting    → $WORK_DIR/ve/small_mol  (+ itgt from $ITGT_DIR)
 #
 # Prerequisites:
 #   - The matching IMPRESS delta_env_setup.sh already completed
@@ -43,9 +45,17 @@ case "${IMPRESS_USECASE}" in
         _DEFAULT_ENV="${WORK_DIR}/ve/small_mol"
         _IMPRESS_SETUP="IMPRESS/examples/small_molecule_binding/delta_env_setup.sh"
         ;;
+    interface_targeting)
+        # Same pipeline and therefore the same venv as small_molecule_binding;
+        # this use case adds the itgt surrogate on top rather than changing the
+        # toolchain underneath.
+        _DEFAULT_ENV="${WORK_DIR}/ve/small_mol"
+        _IMPRESS_SETUP="IMPRESS/examples/small_molecule_binding/delta_env_setup.sh"
+        _INSTALL_ITGT="yes"
+        ;;
     *)
         echo "ERROR: Unknown IMPRESS_USECASE=${IMPRESS_USECASE}"
-        echo "       Valid: protein_binding, small_molecule_binding"
+        echo "       Valid: protein_binding, small_molecule_binding, interface_targeting"
         exit 1
         ;;
 esac
@@ -96,6 +106,26 @@ fi
 "${PIP}" install -q -e "${ROME_DIR}"
 echo "  ROME installed from ${ROME_DIR}"
 
+# ── 2b. itgt (interface_targeting only) ───────────────────────────────────────
+if [ "${_INSTALL_ITGT:-}" = "yes" ]; then
+    echo ""
+    echo "── Step 2b: itgt (interface-targeting models) ──"
+    ITGT_DIR="${ITGT_DIR:-${WORK_DIR}/interface-targeting}"
+    if [ -d "${ITGT_DIR}" ]; then
+        # '[ml]' adds torch and scikit-learn. The default surrogate
+        # (reward_ridge) needs only scikit-learn, and the two halves of the
+        # extra fail independently, so install both and let the component
+        # choose.
+        "${PIP}" install -q -e "${ITGT_DIR}[ml]" \
+            || "${PIP}" install -q -e "${ITGT_DIR}"
+        echo "  itgt installed from ${ITGT_DIR}"
+    else
+        echo "  [WARN] ITGT_DIR not found: ${ITGT_DIR}"
+        echo "         The campaign will run with a frozen diffusion target."
+        echo "         Clone interface-targeting there or export ITGT_DIR."
+    fi
+fi
+
 # ── 3. Verify ─────────────────────────────────────────────────────────────────
 echo ""
 echo "── Step 3: Verifying ──"
@@ -110,6 +140,9 @@ _check() {
 }
 _check "impress" "${PY}" -c "import impress; print('ok')"
 _check "rome"    "${PY}" -c "import rome; print('ok')"
+if [ "${_INSTALL_ITGT:-}" = "yes" ]; then
+    _check "itgt" "${PY}" -c "import itgt; print('ok')"
+fi
 
 echo ""
 echo "================================================================="

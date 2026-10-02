@@ -58,7 +58,7 @@ from typing import Any, Dict, List, Optional
 class MPNNStreamConfig:
     """Settings for a ProteinMPNN inference stream.
 
-    Kept separate from :class:`~examples.impress_r.mpnn.ProteinMPNNConfig` (the
+    Kept separate from :class:`~examples.impress_r.protein_binding.mpnn_trainer.ProteinMPNNConfig` (the
     *training* config) because a stream only needs the checkout, the model name,
     and how to sample — no optimiser or chain-loss knobs. Picklable, so it rides
     to the stream's task process via ``StreamConfig.load_kwargs``.

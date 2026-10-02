@@ -20,12 +20,20 @@ ROOT = Path(__file__).parent.parent
 
 #: (import root, package directory) pairs to document. The import root is what
 #: module paths are made relative to, so ``rome/data.py`` documents as
-#: ``rome.data`` and ``examples/impress_r/mpnn.py`` as
-#: ``examples.impress_r.mpnn``.
+#: ``rome.data`` and ``examples/impress_r/protein_binding/mpnn_trainer.py`` as
+#: ``examples.impress_r.protein_binding.mpnn_trainer``.
 PACKAGES = [(ROOT, ROOT / "rome")]
 
 #: Individual modules outside the framework package that are still public API.
-EXTRA_MODULES = [(ROOT, ROOT / "examples" / "impress_r" / "protein_binding" / "mpnn_trainer.py")]
+#: The ``interface_targeting`` modules are read statically like everything else,
+#: so they document without ``itgt``, torch or scikit-learn installed -- which is
+#: also why the heavy imports in that workflow are inside functions.
+EXTRA_MODULES = [
+    (ROOT, ROOT / "examples" / "impress_r" / "protein_binding" / "mpnn_trainer.py"),
+    (ROOT, ROOT / "examples" / "impress_r" / "interface_targeting" / "itgt_trainer.py"),
+    (ROOT, ROOT / "examples" / "impress_r" / "interface_targeting" / "itgt_spec.py"),
+    (ROOT, ROOT / "examples" / "impress_r" / "interface_targeting" / "itgt_propose.py"),
+]
 
 #: Private modules — documented nowhere, since they are not API.
 SKIP_STEMS = {"_logging"}

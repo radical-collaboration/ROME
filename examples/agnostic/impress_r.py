@@ -37,7 +37,7 @@ import rome
 # Put the repo root on sys.path so the example package resolves whether this is
 # run as a script or imported.
 try:
-    from examples.impress_r.mpnn import (
+    from examples.impress_r.protein_binding.mpnn_trainer import (
         ProteinMPNNConfig,
         ProteinMPNNTrainer,
         impress_corpus_filter,
@@ -47,7 +47,7 @@ except ModuleNotFoundError:
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))))
-    from examples.impress_r.mpnn import (
+    from examples.impress_r.protein_binding.mpnn_trainer import (
         ProteinMPNNConfig,
         ProteinMPNNTrainer,
         impress_corpus_filter,

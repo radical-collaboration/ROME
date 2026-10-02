@@ -39,6 +39,23 @@ def my_reward_fn(record: dict) -> float:
 | `path` | str | Path to the staged PDB |
 | `uid` | str | 32-char hex corpus ID |
 
+#### interface_targeting
+
+| Field | Type | Description |
+|---|---|---|
+| `ligand_iptm` | float \| None | Fold-stage interface confidence [0–1] — **the reward**. `None` when the confidence JSON carried no such key. |
+| `plddt` | float | Mean complex pLDDT [0–100] |
+| `interaction_energy` | float \| None | Rosetta interaction energy [REU; negative is better] |
+| `max_sc` | float \| None | Shape complementarity [0–1; higher is better] |
+| `action_uid` | str | Provenance id of the partition this pass ran under |
+| `path` | str | Path to the staged fold complex |
+| `uid` | str | 32-char hex corpus ID |
+
+This corpus is the round *trigger*, not the training set. The surrogate fits on
+`campaign_outputs/itgt_replay.jsonl` — the `(partition, ligand_iptm)` pairs — so
+a reward function here changes which passes count toward `ROME_MIN_SAMPLES` and
+what gets logged, while the regression target stays `ligand_iptm` itself.
+
 ### Default implementations
 
 **protein_binding** — `mpnn_trainer.pb_reward_fn`:
@@ -117,6 +134,30 @@ def ptm_focused(record: dict) -> float:
 
     return ptm * 0.6 + (plddt / 100.0) * 0.3 + max(0.0, 1.0 - pae / 20.0) * 0.1
 ```
+
+### Interface targeting — admit everything, including failures
+
+The default already does this, and it is worth not undoing. A reward regression
+needs its negatives: filter to good designs and you truncate the response
+variable, leaving the model unable to tell a bad partition from an unobserved
+one. The pipeline hands back a fold model whenever one was produced, not only on
+a pass, so the failures arrive for free.
+
+```python
+# interface_targeting/itgt_trainer.py — both knobs default OFF
+from itgt_trainer import itgt_corpus_filter
+
+filter_func = itgt_corpus_filter()                      # admits ligand_iptm=None
+filter_func = itgt_corpus_filter(min_ligand_iptm=0.2)   # only for artefacts
+```
+
+Likewise `percentile_sampler`'s `fraction` defaults to `1.0` here rather than the
+sibling's `0.33`: selecting the best third of a reward regression's own training
+data is a bias, not a filter.
+
+Lower it only for `ROME_ITGT_COMPONENT=burial_prior`, where the sampler is the
+one place the reward enters the objective at all — and read that component's
+warning first.
 
 ### Small molecule — interaction energy only (when pLDDT is uniformly high)
 

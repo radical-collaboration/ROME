@@ -7,7 +7,7 @@ imported lazily so a workflow that does not use it never pays for TRL.
 
 The ProteinMPNN trainer is *not* here: it is an IMPRESS-R integration, not
 framework core, so it ships with that example —
-``examples/impress_r/mpnn.py`` (``from examples.impress_r.mpnn import
+``examples/impress_r/protein_binding/mpnn_trainer.py`` (``from examples.impress_r.protein_binding.mpnn_trainer import
 ProteinMPNNTrainer, ProteinMPNNConfig``).
 """
 

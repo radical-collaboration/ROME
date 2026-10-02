@@ -33,7 +33,7 @@ See **[docs/quickstart.md](https://github.com/radical-collaboration/ROME/blob/ma
 
 ```python
 import rome
-from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer, percentile_sampler
+from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer, percentile_sampler
 
 manager = rome.Manager(
     asyncflow,                                  # your existing WorkflowEngine
@@ -110,7 +110,7 @@ A bare `(dataset, output_dir, **kwargs) -> checkpoint_path` function works too �
 it is wrapped in a `FunctionTrainer` for you. The LLM trainers ship with ROME —
 `rome.train.llm.GRPOTrainer` (TRL/GRPO) and `rome.train.llm.SFTTrainer`
 (supervised fine-tuning on chosen responses) — while
-`examples.impress_r.mpnn.ProteinMPNNTrainer` (IMPRESS-R) lives with its example.
+`examples.impress_r.protein_binding.mpnn_trainer.ProteinMPNNTrainer` (IMPRESS-R) lives with its example.
 
 #### Which trainer should I use?
 
@@ -237,7 +237,7 @@ See `examples/agnostic/impress_r.py` (data + training),
 `examples/agnostic/llm_grpo_streams.py` (all three managers, GRPO), and
 `examples/agnostic/llm_sft_streams.py` (all three managers, SFT on the model's
 own correct answers — rejection sampling / STaR). For the protein side,
-`examples/impress_r/mpnn.py` is the ProteinMPNN trainer and
+`examples/impress_r/protein_binding/mpnn_trainer.py` is the ProteinMPNN trainer and
 `examples/impress_r/mpnn_stream.py` runs ProteinMPNN design as an inference
 stream — supporting both a ROME-native path (`protein_mpnn_run.py`) and an
 IMPRESS wrapper (`mpnn_wrapper.py`) — and hot-swaps onto each published

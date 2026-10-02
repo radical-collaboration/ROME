@@ -53,10 +53,10 @@ set -e
 # ── Use-case selection ────────────────────────────────────────────────────────
 IMPRESS_USECASE="${IMPRESS_USECASE:-protein_binding}"
 case "${IMPRESS_USECASE}" in
-    protein_binding|small_molecule_binding) ;;
+    protein_binding|small_molecule_binding|interface_targeting) ;;
     *)
         echo "ERROR: Unknown IMPRESS_USECASE=${IMPRESS_USECASE}"
-        echo "       Valid: protein_binding, small_molecule_binding"
+        echo "       Valid: protein_binding, small_molecule_binding, interface_targeting"
         exit 1
         ;;
 esac
@@ -82,6 +82,9 @@ export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${MPI_LIB}:${FAB_LIB}:${LD_LIBRARY_PAT
 
 # ── Shared ROME settings ──────────────────────────────────────────────────────
 export ROME_DIR="${ROME_DIR:-${WORK_DIR}/ROME}"
+# Remember whether the caller chose a trainer, so a use-case default below
+# cannot overwrite an explicit `ROME_TRAINER=dummy`.
+_ROME_TRAINER_SET="${ROME_TRAINER:+yes}"
 export ROME_TRAINER="${ROME_TRAINER:-mpnn}"
 # 120 s gives training rounds time to finish before Dragon's DDict result
 # delivery future blocks (dragonhpc 0.14.1 DDict race).
@@ -116,7 +119,13 @@ if [ "${IMPRESS_USECASE}" = "protein_binding" ]; then
     echo "IMPRESS_SCRIPTS_DIR: ${IMPRESS_SCRIPTS_DIR}"
     echo "IMPRESS_BASE_DIR:    ${IMPRESS_BASE_DIR}"
 
-elif [ "${IMPRESS_USECASE}" = "small_molecule_binding" ]; then
+elif [ "${IMPRESS_USECASE}" = "small_molecule_binding" ] \
+  || [ "${IMPRESS_USECASE}" = "interface_targeting" ]; then
+
+    # interface_targeting drives the *same* SmallMoleculeBindingPipeline as
+    # small_molecule_binding -- it learns stage 1's parameters instead of
+    # fine-tuning stage 2's model -- so it needs the identical toolchain:
+    # LigandMPNN, Boltz and the RFD3 foundry sandbox.
 
     IMPRESS_VENV="${IMPRESS_VENV:-${WORK_DIR}/ve/small_mol}"
     export MPNN_DIR="${MPNN_DIR:-${WORK_DIR}/LigandMPNN}"
@@ -124,10 +133,32 @@ elif [ "${IMPRESS_USECASE}" = "small_molecule_binding" ]; then
     export BOLTZ_CACHE="${BOLTZ_CACHE:-${WORK_DIR}/.cache/boltz}"
     mkdir -p "${BOLTZ_CACHE}"
     export IMPRESS_DIR="${IMPRESS_DIR:-${WORK_DIR}/IMPRESS}"
-    export IMPRESS_OUTPUT_DIR="${IMPRESS_OUTPUT_DIR:-${ROME_DIR}/examples/impress_r/small_molecule_binding/campaign_outputs}"
+    export IMPRESS_OUTPUT_DIR="${IMPRESS_OUTPUT_DIR:-${ROME_DIR}/examples/impress_r/${IMPRESS_USECASE}/campaign_outputs}"
     export IMPRESS_N_PIPELINES="${IMPRESS_N_PIPELINES:-2}"
     export ROME_MIN_SAMPLES="${ROME_MIN_SAMPLES:-8}"
     ROME_SCRIPT="run_smb_rome.py"
+
+    if [ "${IMPRESS_USECASE}" = "interface_targeting" ]; then
+        ROME_SCRIPT="run_interface_targeting_rome.py"
+        if [ -z "${_ROME_TRAINER_SET}" ]; then
+            export ROME_TRAINER="itgt"   # the shared default is mpnn
+        fi
+        # The interface-targeting checkout supplying the models. No trained
+        # weights ship with it, so every campaign fits its own surrogate; an
+        # unset ITGT_DIR degrades to "the hand-authored partition, unchanged"
+        # rather than failing the run.
+        export ITGT_DIR="${ITGT_DIR:-${WORK_DIR}/interface-targeting}"
+        export ROME_ITGT_COMPONENT="${ROME_ITGT_COMPONENT:-reward_ridge}"
+        export ROME_ITGT_CANDIDATES="${ROME_ITGT_CANDIDATES:-64}"
+        export ROME_ITGT_SIZE_BAND="${ROME_ITGT_SIZE_BAND:-4}"
+
+        if [ ! -d "${ITGT_DIR}" ]; then
+            echo "WARNING: ITGT_DIR does not exist: ${ITGT_DIR}"
+            echo "         The campaign will run with a frozen diffusion target."
+        fi
+        echo "ITGT_DIR:            ${ITGT_DIR}"
+        echo "ITGT_COMPONENT:      ${ROME_ITGT_COMPONENT}"
+    fi
 
     if [ ! -d "${MPNN_DIR}" ]; then
         echo "ERROR: MPNN_DIR does not exist: ${MPNN_DIR}"

@@ -1,7 +1,7 @@
 """LLM trainer tasks: GRPO (reinforcement) and SFT (supervised).
 
 The trainer shipped with the framework (the ProteinMPNN trainer lives with the
-IMPRESS-R example, ``examples/impress_r/mpnn.py``). It is the demonstration that
+IMPRESS-R example, ``examples/impress_r/protein_binding/mpnn_trainer.py``). It is the demonstration that
 "adding new models and training algorithms requires just one task": everything
 below this line is TRL-specific, and nothing above it — the data manager, the
 training manager, the stream manager — knows that an LLM is involved.

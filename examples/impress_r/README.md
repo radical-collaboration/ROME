@@ -1,7 +1,16 @@
 # IMPRESS-R: ROME adaptive fine-tuning for IMPRESS pipelines
 
-ROME-A closes IMPRESS's open loop by fine-tuning the sequence design model
-(ProteinMPNN or LigandMPNN) mid-campaign on high-confidence designs.
+ROME-A closes IMPRESS's open loop mid-campaign. Two of the three use cases here
+do it by fine-tuning the **sequence design model** (ProteinMPNN or LigandMPNN)
+on high-confidence designs. The third closes the loop one stage earlier, around
+**backbone diffusion**, by learning the parameters RFD3 is conditioned on
+instead of retraining any model in the pipeline.
+
+| Use case | What improves | What stays fixed |
+|----------|---------------|------------------|
+| `protein_binding` | ProteinMPNN weights | the diffusion target |
+| `small_molecule_binding` | LigandMPNN weights | the diffusion target |
+| `interface_targeting` | the **diffusion target** (which ligand atoms the binder is designed to contact) | every model in the pipeline |
 
 ## Prerequisites
 
@@ -29,7 +38,8 @@ cd $WORK_DIR/ROME/examples/impress_r
 
 export SBATCH_ACCOUNT=<project>-delta-gpu
 export WORK_DIR=/work/nvme/bdyk/$USER
-export IMPRESS_USECASE=protein_binding   # or small_molecule_binding
+export IMPRESS_USECASE=protein_binding   # or small_molecule_binding,
+                                         # or interface_targeting
 
 bash submit.sh
 ```
@@ -72,12 +82,37 @@ Logs land in `<use_case>/logs/` and outputs in `<use_case>/campaign_outputs/`:
 | `IMPRESS_N_PIPELINES` | `2` | Number of top-level pipelines |
 | `ROME_MIN_SAMPLES` | `8` | Corpus size before first training round |
 
-### Shared ROME settings (both use cases)
+### interface_targeting
+
+Drives the same `SmallMoleculeBindingPipeline` as `small_molecule_binding`, so
+it needs **every variable in that section too** (`MPNN_DIR`, `BOLTZ_CACHE`,
+`FOUNDRY_SIF_PATH`, `IMPRESS_DIR`) plus these:
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `ITGT_DIR` | `$WORK_DIR/interface-targeting` | interface-targeting checkout supplying the models |
+| `ROME_ITGT_COMPONENT` | `reward_ridge` | `reward_ridge` (action→outcome surrogate), `burial_prior` or `trunk` |
+| `ROME_ITGT_CANDIDATES` | `64` | Candidate partitions ranked per proposal |
+| `ROME_ITGT_SIZE_BAND` | `4` | Half-width of the selection-size band around the template's own selection |
+| `IMPRESS_OUTPUT_DIR` | `interface_targeting/campaign_outputs` | Campaign output root |
+
+An unset or missing `ITGT_DIR` is not fatal: the campaign runs with the
+hand-authored partition unchanged, which is exactly what `small_molecule_binding`
+does today.
+
+> **`burial_prior` and `trunk` are self-confirming.** They fit itgt's per-atom
+> scorer on the burial of the designed binder — but the binder buried those
+> atoms *because the previous round's `select_buried` told RFD3 to bury them*,
+> so the label measures compliance with our own instruction and `ligand_iptm`
+> never enters the objective. They are offered as a cold-start prior and an
+> ablation. `reward_ridge` is the component that optimises the reward.
+
+### Shared ROME settings (all use cases)
 
 | Var | Default | Description |
 |-----|---------|-------------|
 | `ROME_DIR` | `$WORK_DIR/ROME` | ROME checkout |
-| `ROME_TRAINER` | `mpnn` | `mpnn` = ProteinMPNN/LigandMPNN fine-tune |
+| `ROME_TRAINER` | `mpnn` (`itgt` for `interface_targeting`) | `mpnn` = ProteinMPNN/LigandMPNN fine-tune; `itgt` = interface-target surrogate; `dummy` = exercise the loop with no model |
 | `ROME_FALLBACK` | `120` | Seconds to wait for Dragon result before reading checkpoint from disk |
 | `ROME_REWARD_FN` | use-case default | `module:function` reward override (e.g. `mpnn_trainer:pb_reward_fn`) |
 
@@ -91,6 +126,7 @@ Each use case ships a default reward function in its trainer module:
 |----------|--------|----------|
 | protein_binding | `protein_binding/mpnn_trainer.py` | `pb_reward_fn` |
 | small_molecule_binding | `small_molecule_binding/ligandmpnn_trainer.py` | `smb_reward_fn` |
+| interface_targeting | `interface_targeting/itgt_trainer.py` | `itgt_reward_fn` |
 
 To use a different function, set `ROME_REWARD_FN=<module>:<function>` before submitting.
 The module is resolved relative to the use-case directory, and the function must accept
@@ -118,6 +154,13 @@ IMPRESS_USECASE=protein_binding ROME_MIN_SAMPLES=2 bash submit.sh
 
 # Small molecule binding quick validation
 IMPRESS_USECASE=small_molecule_binding IMPRESS_N_PIPELINES=1 ROME_MIN_SAMPLES=2 bash submit.sh
+
+# Interface targeting: exercise the loop with no surrogate at all
+IMPRESS_USECASE=interface_targeting ROME_TRAINER=dummy IMPRESS_N_PIPELINES=1 \
+    ROME_MIN_SAMPLES=2 bash submit.sh
+
+# Interface targeting, real surrogate
+IMPRESS_USECASE=interface_targeting IMPRESS_N_PIPELINES=1 ROME_MIN_SAMPLES=2 bash submit.sh
 ```
 
 ## Reading the output
@@ -170,4 +213,44 @@ impress_r/
     ligandmpnn_trainer.py       — LigandMPNN trainer + smb_reward_fn
     logs/                       — SLURM logs (created by submit.sh)
     campaign_outputs/           — created at runtime
+  interface_targeting/
+    run_interface_targeting_rome.py — entry point (same IMPRESS pipeline, 3 hooks)
+    itgt_spec.py                — read/patch the RFD3 base spec (pure stdlib)
+    itgt_trainer.py             — surrogate trainer + itgt_reward_fn
+    itgt_train_wrapper.py       — fit CLI (invoked as a task subprocess)
+    itgt_propose.py             — propose a partition and install it
+    logs/                       — SLURM logs (created by submit.sh)
+    campaign_outputs/           — created at runtime
+      rome_inputs/p{N}_in/      — staged pipeline inputs (written every round)
+        .itgt/template.json     — pristine spec; every round patches from this
+        .itgt/history/v{n}.json — the partition each round installed
+      itgt_replay.jsonl         — the (action, reward) pairs the surrogate fits
 ```
+
+---
+
+## How `interface_targeting` differs
+
+The diffusion target lives in each pipeline's base RFD3 spec
+(`p{N}_in/ALR_binder_design.json`) as the `select_buried`/`select_exposed`
+partition of the ligand's heavy atoms. It has been hand-authored and identical
+in every campaign to date. This use case makes it a learned quantity:
+
+1. **Harvest** — each pass's `ligand_iptm` is paired with the partition that
+   pass actually ran under, and appended to `itgt_replay.jsonl`.
+2. **Fit** — a ridge regression over those `(action, reward)` pairs, reported
+   with leave-one-group-out over `(pipeline, pass)` groups.
+3. **Propose** — random connected surface patches are scored by that model and
+   the best is installed as the next pass's partition.
+
+Three consequences worth knowing:
+
+- **Failed folds are kept.** The pipeline records a fold model whenever one was
+  produced, not only on a pass, and a reward regression needs its negatives.
+- **The spec is patched, never regenerated**, and always from
+  `.itgt/template.json` rather than from the previous round's output, so
+  proposals cannot compound.
+- **`scripts/validate_run.py` check 3 will fail** for rounds older than the
+  current base spec: it asserts every guided JSON matches the base verbatim,
+  which stops being true once the base moves. `.itgt/history/v{n}.json` is what
+  keeps those rounds auditable.
