@@ -198,7 +198,7 @@ trainer = ProteinMPNNTrainer(ProteinMPNNConfig(
 It lives with the example rather than in `rome/` on purpose: it is an IMPRESS-R
 *integration*, and ROME is workflow agnostic. See
 [Fine-tuning ProteinMPNN](../proteinmpnn_training.md) and
-[the API reference](../api/examples/impress_r/mpnn.md).
+[the API reference](../api/examples/impress_r/protein_binding/mpnn_trainer.md).
 
 ### `rome.dummy.DummyTrainer`
 

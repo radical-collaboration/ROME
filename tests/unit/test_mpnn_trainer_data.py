@@ -5,7 +5,7 @@ staging, the manifest, the checkpoint format, and building the command + job
 spec (`as_command`) — turns a ROME corpus into what the original
 ``dauparas/ProteinMPNN`` fine-tuning loop consumes and publishes, and needs
 nothing but the standard library plus pandas. The *training* half
-(`examples.impress_r.mpnn_train_wrapper.run_round`) imports torch and the
+(`examples.impress_r.protein_binding.mpnn_train_wrapper.run_round`) imports torch and the
 ProteinMPNN checkout and runs on a GPU; it is not reachable here and is covered
 in ``tests/integration/test_mpnn_train_real.py``.
 
@@ -24,7 +24,7 @@ import os
 import pandas as pd
 import pytest
 
-from examples.impress_r.mpnn import (
+from examples.impress_r.protein_binding.mpnn_trainer import (
     DEFAULT_CONTEXT_CHAINS,
     DEFAULT_DESIGN_CHAINS,
     ProteinMPNNConfig,
