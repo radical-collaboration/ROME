@@ -22,7 +22,7 @@ pytest.importorskip("impress")
 pytest.importorskip("rhapsody")
 
 try:
-    from examples.impress_r.run_protein_binding_rome import make_adaptive_decision  # noqa: E402
+    from examples.impress_r.protein_binding.run_protein_binding_rome import make_adaptive_decision  # noqa: E402
 except Exception as exc:  # the runner's deps are cluster-managed; skip if absent
     pytest.skip(f"run_protein_binding_rome not importable here: {exc}",
                 allow_module_level=True)

@@ -39,7 +39,8 @@ An IMPRESS protein-binding design is a complex, not a monomer:
 `protein_binding.py` writes the prediction input as two chains — a designed
 `>pdz` and a constant `>pep` of `EGYQDYEPEA` — and the AF/Boltz prediction of
 that pair (coordinates + the designed sequence in chain A) is the training
-example.
+example. The peptide sequence `EGYQDYEPEA` is the same for every design and
+every pipeline; only chain A carries designed sequence.
 
 Fine-tuning has to respect that. ProteinMPNN's chain mask expresses exactly the
 right thing:
@@ -61,6 +62,13 @@ sets `context_chains=()`; a per-structure rule can be supplied as
 absent from a file are dropped, and a design with no designable chain present is
 rejected in `validate` rather than producing an empty loss on the GPU.
 
+!!! note "foundry's stock `n_prot == 1` filter rejects every example"
+
+    This use case is a two-chain complex where one chain is fixed context.
+    foundry's built-in filter for single-chain structures (`n_prot == 1`) rejects
+    every IMPRESS-R record — use `impress_corpus_filter()` or a custom
+    `filter_func` instead, and set the chain designation explicitly.
+
 ## 3. What data a round needs
 
 Per accepted design, a corpus record needs:
@@ -70,22 +78,63 @@ manager.add_training_data(
     path=<the design's predicted structure, chain A designed, chain B context>,
     sequence=<designed sequence>,     # optional: manifest + sizing only
     backbone_id=<parent pipeline>,    # audit
-    pLDDT=..., pTM=..., pAE=...,       # selection (see docs/impress.md)
+    pLDDT=..., pTM=..., pAE=...,
 )
 ```
 
 Only `path` is required — ProteinMPNN reads the label (the designed chain's
-residues) out of the structure itself; there is no separate sequence label. Two
-things the integration must get right, both from `docs/impress.md`:
+residues) out of the structure itself; there is no separate sequence label.
 
-1. **The path must be a stable snapshot.** IMPRESS keys its prediction output by
-   pipeline, not by pass, and `finalize()` deletes it, so a recorded path goes
-   stale. The trainer defends against basename collisions by *staging* every
-   structure into the round's own directory under a unique name
-   (`stage_structures`), but the contribution step still has to record a path
-   whose contents are correct at record time.
-2. **Rank by pAE/pTM, not pLDDT** when selecting which designs enter the corpus —
-   pLDDT barely moves. Prefer `percentile_sampler`; see `docs/impress.md` §9.
+### Corpus growth rate
+
+The campaign folds and scores **one design per pipeline per pass**, regardless of
+`num_seqs`. MPNN emits `num_seqs` sequences but `s3` selects a single one by
+rank; only that one enters the predictor, and only a predicted structure is a
+training example. **The corpus therefore grows by at most one record per
+(pipeline, pass)** — the other sequences are never labelled.
+
+This is the binding constraint when setting `min_samples`: a threshold tuned for
+an LLM campaign (hundreds of records per minute) will never fire here. Key
+records on `(pipeline_name, pass)` rather than on the design ID, which is
+identical every pass.
+
+### The path must be a stable snapshot
+
+IMPRESS keys its prediction output by **pipeline, not by pass**:
+`output_path_af/{design}.pdb` is overwritten on every pass and deleted outright
+by `finalize()`. A corpus record storing that path directly would point at a
+file whose contents change — or vanish — before the training round runs.
+
+The contribution step must copy the file to a pass-qualified location before
+recording it:
+
+```python
+staged = f"{stage_dir}/{pipeline.name}_pass{pipeline.passes}_{design}.pdb"
+shutil.copyfile(src, staged)
+manager.add_training_data(path=staged, ...)
+```
+
+The trainer's `stage_structures` step handles basename collisions *within a
+round*, but it cannot fix a path that was already stale at record time.
+
+### Rank by pAE or pTM, not pLDDT
+
+pLDDT is nearly constant across accepted designs (everything reaching the score
+CSVs has already cleared IMPRESS's own `pLDDT >= 80` filter), so ranking on it
+is close to ranking at random. pAE has the widest spread and is the interface
+metric IMPRESS's own degradation criterion uses.
+
+A fixed threshold (`pTM >= 0.90`) is also predictor-specific — AlphaFold2 and
+Boltz do not share a confidence scale. Use `percentile_sampler` instead:
+
+```python
+from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
+rome.DataConfig(min_samples=4, sample_func=percentile_sampler(0.33))
+```
+
+`percentile_sampler(0.33)` selects the best third of what this campaign has
+produced, calibrating itself on the fly regardless of predictor. See
+[Percentile sampling](guide/data.md#percentile-sampling-when-you-dont-know-your-thresholds).
 
 ## 4. What a round produces, and where it goes
 

@@ -66,7 +66,7 @@ serving through it, and watch `stop()` wait it out rather than cancelling it.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ROME_BACKEND` | `local` | `dragon` swaps `LocalExecutionBackend` for `DragonExecutionBackendV3`. |
+| `ROME_BACKEND` | `local` | `dragon` swaps `LocalExecutionBackend` for `DragonExecutionBackend`. |
 | `ROME_STREAM_REPLICAS` | 2 local / 1 Dragon | Keep below the allocation's concurrent-task capacity, or no slot is left for the round. |
 | `ROME_GPUS` | 0 | Leave at 0 on a GPU-less node, or tasks are accepted and never placed. |
 | `ROME_FALLBACK` | 4 | `result_fallback_seconds`. The 60 s default is right for a real round and longer than this whole demo. |

@@ -432,14 +432,12 @@ class ProteinMPNNTrainer(TrainTask):
     # -- corpus materialization (testable, no torch) ------------------------
 
     def write_manifest(self, records: List[Dict[str, Any]], output_dir: str) -> str:
-        """Write the round's training manifest (parquet); returns its path.
+        """Write the round's training manifest (JSON); returns its path.
 
         The audit trail for "what did this round train on": one row per design
         with its staged structure, chain designation, and scores. Public and
         side-effect-light so a workflow can inspect a round before trusting it.
         """
-        import pandas as pd
-
         cfg = self.config
         manifest_dir = cfg.manifest_dir or os.path.join(output_dir, "manifest")
         os.makedirs(manifest_dir, exist_ok=True)
@@ -464,8 +462,10 @@ class ProteinMPNNTrainer(TrainTask):
                 "pAE": record.get("pAE"),
                 "produced_under_version": record.get("model_version"),
             })
-        path = os.path.join(manifest_dir, "train_manifest.parquet")
-        pd.DataFrame(rows).to_parquet(path)
+        import json
+        path = os.path.join(manifest_dir, "train_manifest.json")
+        with open(path, "w") as f:
+            json.dump(rows, f, indent=2)
         return path
 
     # -- the round: prepare a job, run it as a command ----------------------
@@ -787,6 +787,26 @@ def percentile_sampler(
     return _sample
 
 
+def pb_reward_fn(record: Dict[str, Any]) -> float:
+    """Per-sample training reward for protein binding designs.
+
+    Higher reward → more gradient for this sample in the fine-tuning round.
+
+    Metrics (all written by the ROME hook in run_protein_binding_rome.py):
+      pLDDT  0–100   higher = more confident structure prediction
+      pTM    0–1     higher = better global topology match
+      pAE    0–∞     lower  = better interface alignment error (cap at 30)
+
+    Weights reflect that interface quality (pAE) matters most for binding,
+    followed by fold confidence (pLDDT) and topology (pTM).  Tune via
+    ROME_REWARD_FN=mpnn_trainer:pb_reward_fn or point at a custom function.
+    """
+    plddt = float(record.get("pLDDT", 0.0))
+    ptm   = float(record.get("pTM",   0.0))
+    pae   = float(record.get("pAE",   30.0))
+    return (plddt / 100.0) * 0.4 + ptm * 0.3 + max(0.0, 1.0 - pae / 30.0) * 0.3
+
+
 __all__ = [
     "ProteinMPNNConfig",
     "ProteinMPNNTrainer",
@@ -799,6 +819,7 @@ __all__ = [
     "impress_corpus_filter",
     "percentile_sampler",
     "score_percentiles",
+    "pb_reward_fn",
     "DEFAULT_RANK_BY",
     "DEFAULT_DESIGN_CHAINS",
     "DEFAULT_CONTEXT_CHAINS",

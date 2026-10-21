@@ -209,5 +209,5 @@ from concurrent.futures import ProcessPoolExecutor
 backend = await ConcurrentExecutionBackend(ProcessPoolExecutor())
 ```
 
-See `examples/impress_r/run_protein_binding_rome.py` for the real-campaign
+See `examples/impress_r/protein_binding/run_protein_binding_rome.py` for the real-campaign
 version, and [Setting up on Delta](../delta.md) for the Dragon one.

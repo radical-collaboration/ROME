@@ -72,7 +72,7 @@ watch:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/Iznoanygod/ROME
+      link: https://github.com/radical-collaboration/ROME
 
 extra_css:
   - stylesheets/extra.css
@@ -99,7 +99,7 @@ markdown_extensions:
   - pymdownx.keys
   - pymdownx.magiclink:
       repo_url_shorthand: true
-      user: Iznoanygod
+      user: radical-collaboration
       repo: ROME
   - pymdownx.mark
   - pymdownx.smartsymbols
@@ -142,7 +142,6 @@ nav:
       - IMPRESS-R: examples/impress-r.md
   - HPC:
       - Setting up on Delta: delta.md
-      - Running IMPRESS: impress.md
       - Fine-tuning ProteinMPNN: proteinmpnn_training.md
   - API Reference:
       - ROME: api/

@@ -3,7 +3,7 @@
     dragon -s tests/dragon/test_executable_result_hang_dragon.py
 
 A minimal, self-contained reproducer for an upstream report: no ROME, just
-``dragon`` + ``rhapsody`` (``DragonExecutionBackendV3``) + ``radical.asyncflow``.
+``dragon`` + ``rhapsody`` (``DragonExecutionBackend``) + ``radical.asyncflow``.
 It shows that while a long-lived **service** task is running, an ordinary
 **executable** task submitted afterwards runs to completion — the shell command
 executes and writes its output file — yet the ``asyncio.Future`` asyncflow
@@ -52,9 +52,12 @@ def say(m):
 
 async def main():
     from radical.asyncflow import WorkflowEngine
-    from rhapsody.backends import DragonExecutionBackendV3
+    try:
+        from rhapsody.backends import DragonExecutionBackend
+    except ImportError:
+        from rhapsody.backends import DragonExecutionBackendV3 as DragonExecutionBackend
 
-    backend = await DragonExecutionBackendV3({"results_ddict_mem": 256 * 1024 ** 2})
+    backend = await DragonExecutionBackend({"results_ddict_mem": 256 * 1024 ** 2})
     flow = await WorkflowEngine.create(backend=backend)
 
     workdir = tempfile.mkdtemp(prefix="exec_hang_")

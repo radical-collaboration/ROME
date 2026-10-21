@@ -5,6 +5,10 @@ build/
 dist/
 .pytest_cache/
 rome_checkpoints/
+campaign_outputs/
+logs/
+**/logs/
+asyncflow.session.*/
 
 # mkdocs build output
 site/
@@ -13,6 +17,7 @@ site/
 # Stray build and run output
 *.log
 *.out
+*.err
 *.pdf
 
 # Dragon leaves DDict orchestrator files in the cwd

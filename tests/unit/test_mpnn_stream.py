@@ -10,7 +10,7 @@ pointer refresh), and that the builders produce a well-formed INFERENCE stream.
 import os
 from types import SimpleNamespace
 
-from examples.impress_r.mpnn_stream import (
+from examples.impress_r.protein_binding.mpnn_stream import (
     MPNNStreamConfig,
     build_impress_command,
     build_run_command,
@@ -101,7 +101,7 @@ def test_load_refreshes_the_repo_pointer_for_the_impress_flavor(tmp_path):
 
 
 def test_builders_make_an_inference_stream_carrying_settings():
-    from examples.impress_r.mpnn_stream import impress_mpnn_stream, mpnn_run_stream
+    from examples.impress_r.protein_binding.mpnn_stream import impress_mpnn_stream, mpnn_run_stream
 
     settings = MPNNStreamConfig(mpnn_repo="/opt/ProteinMPNN")
 

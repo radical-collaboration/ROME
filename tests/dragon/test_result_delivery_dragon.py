@@ -39,12 +39,15 @@ def say(m):
 async def main():
     from dragon.data.ddict import DDict
     from radical.asyncflow import WorkflowEngine
-    from rhapsody.backends import DragonExecutionBackendV3
+    try:
+        from rhapsody.backends import DragonExecutionBackend
+    except ImportError:
+        from rhapsody.backends import DragonExecutionBackendV3 as DragonExecutionBackend
 
     import rome
     from rome.dummy import DummyTrainer, dummy_infer, dummy_load
 
-    backend = await DragonExecutionBackendV3({"results_ddict_mem": 256 * 1024 ** 2})
+    backend = await DragonExecutionBackend({"results_ddict_mem": 256 * 1024 ** 2})
     flow = await WorkflowEngine.create(backend=backend)
     d = DDict(managers_per_node=1, n_nodes=1, total_mem=256 * 1024 ** 2)
     ckpt = tempfile.mkdtemp(prefix="rome_sh_")

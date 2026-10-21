@@ -20,12 +20,12 @@ ROOT = Path(__file__).parent.parent
 
 #: (import root, package directory) pairs to document. The import root is what
 #: module paths are made relative to, so ``rome/data.py`` documents as
-#: ``rome.data`` and ``examples/impress_r/mpnn.py`` as
-#: ``examples.impress_r.mpnn``.
+#: ``rome.data`` and ``examples/impress_r/protein_binding/mpnn_trainer.py`` as
+#: ``examples.impress_r.protein_binding.mpnn_trainer``.
 PACKAGES = [(ROOT, ROOT / "rome")]
 
 #: Individual modules outside the framework package that are still public API.
-EXTRA_MODULES = [(ROOT, ROOT / "examples" / "impress_r" / "mpnn.py")]
+EXTRA_MODULES = [(ROOT, ROOT / "examples" / "impress_r" / "protein_binding" / "mpnn_trainer.py")]
 
 #: Private modules — documented nowhere, since they are not API.
 SKIP_STEMS = {"_logging"}

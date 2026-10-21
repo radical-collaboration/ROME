@@ -54,7 +54,7 @@ def _design(tmp_path, uid, *, backbone="p1", seq="MKTAYIAKQR", pdb=_DIMER_PDB):
 
 
 def test_mpnn_needs_a_structure_path(tmp_path):
-    from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer
+    from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer
 
     trainer = ProteinMPNNTrainer(ProteinMPNNConfig(train_func=lambda *a: "x"))
     with pytest.raises(ValueError, match="path"):
@@ -63,7 +63,7 @@ def test_mpnn_needs_a_structure_path(tmp_path):
 
 def test_config_requires_a_repo_or_a_train_func():
     """The built-in loop needs the ProteinMPNN checkout; the escape hatch does not."""
-    from examples.impress_r.mpnn import ProteinMPNNConfig
+    from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig
 
     with pytest.raises(ValueError, match="mpnn_repo"):
         ProteinMPNNConfig().validate()
@@ -73,19 +73,20 @@ def test_config_requires_a_repo_or_a_train_func():
 
 def test_manifest_records_chain_designation(tmp_path):
     """The manifest is the audit trail, and it carries the dimer designation."""
-    import pandas as pd
-    from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer
+    import json
+    from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer
 
     trainer = ProteinMPNNTrainer(ProteinMPNNConfig(train_func=lambda *a: "x"))
     path = trainer.write_manifest([_design(tmp_path, "d1")], str(tmp_path / "r"))
-    row = pd.read_parquet(path).iloc[0]
+    with open(path) as f:
+        row = json.load(f)[0]
     assert row["designed_chains"] == "A"      # chain A designed
     assert row["context_chains"] == "B"       # peptide is context
     assert row["design_id"] == "d1"
 
 
 def test_custom_train_func_receives_the_manifest(tmp_path):
-    from examples.impress_r.mpnn import ProteinMPNNConfig, ProteinMPNNTrainer
+    from examples.impress_r.protein_binding.mpnn_trainer import ProteinMPNNConfig, ProteinMPNNTrainer
 
     seen = {}
 
@@ -96,12 +97,12 @@ def test_custom_train_func_receives_the_manifest(tmp_path):
     trainer = ProteinMPNNTrainer(ProteinMPNNConfig(train_func=my_train))
     result = trainer.train([_design(tmp_path, "d1")], str(tmp_path))
     assert result == str(tmp_path)
-    assert seen["manifest"].endswith(".parquet")
+    assert seen["manifest"].endswith(".json")
 
 
 def test_published_checkpoint_is_original_format(tmp_path):
     """protein_mpnn_run.py loads model_state_dict + num_edges; both must be there."""
-    from examples.impress_r.mpnn import original_checkpoint
+    from examples.impress_r.protein_binding.mpnn_trainer import original_checkpoint
 
     ckpt = original_checkpoint({"w": 1}, num_edges=48, noise_level=0.2)
     assert ckpt["model_state_dict"] == {"w": 1}
@@ -110,7 +111,7 @@ def test_published_checkpoint_is_original_format(tmp_path):
 
 def test_weights_publish_into_the_repo_when_asked(tmp_path):
     """publish_into_repo names the fixed pointer IMPRESS's next pass loads."""
-    from examples.impress_r.mpnn import (
+    from examples.impress_r.protein_binding.mpnn_trainer import (
         ProteinMPNNConfig,
         repo_pointer_path,
         versioned_checkpoint_path,
@@ -144,7 +145,7 @@ def test_weights_publish_into_the_repo_when_asked(tmp_path):
     ],
 )
 def test_impress_corpus_filter(record, expected):
-    from examples.impress_r.mpnn import impress_corpus_filter
+    from examples.impress_r.protein_binding.mpnn_trainer import impress_corpus_filter
 
     assert impress_corpus_filter()(record) is expected
 
@@ -212,7 +213,7 @@ def test_grpo_builds_a_trl_config_pointing_at_the_round_output(tmp_path):
     config = GRPOConfig(
         model_config=ModelConfig(base_model_name="m"),
         learning_rate=1e-5,
-        extra_args={"seed": 7},
+        extra_args={"seed": 7, "use_cpu": True},
     )
     trl_config = config.build_trl_config(str(tmp_path))
     assert trl_config.output_dir == str(tmp_path)
@@ -262,7 +263,7 @@ def test_sft_builds_a_trl_config_pointing_at_the_round_output(tmp_path):
     from rome.train.llm import ModelConfig, SFTConfig
 
     config = SFTConfig(model_config=ModelConfig(base_model_name="m"),
-                       learning_rate=3e-5, extra_args={"seed": 11})
+                       learning_rate=3e-5, extra_args={"seed": 11, "use_cpu": True})
     trl_config = config.build_trl_config(str(tmp_path))
     assert trl_config.output_dir == str(tmp_path)
     assert trl_config.learning_rate == 3e-5
@@ -287,7 +288,7 @@ def _scored(uid, ptm, pae):
 
 
 def test_percentile_sampler_keeps_the_best_fraction():
-    from examples.impress_r.mpnn import percentile_sampler
+    from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
     corpus = [_scored(f"d{i}", 0.70 + i * 0.02, 8.0 - i * 0.4) for i in range(20)]
     kept = percentile_sampler(0.25, min_shard=1)(corpus)
@@ -298,7 +299,7 @@ def test_percentile_sampler_keeps_the_best_fraction():
 
 def test_percentile_sampler_needs_no_threshold_to_calibrate():
     """The same fraction selects sensibly on two incompatible score scales."""
-    from examples.impress_r.mpnn import percentile_sampler
+    from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
     sampler = percentile_sampler(0.5, min_shard=1)
     # A generous predictor and a harsh one, same ordering.
@@ -311,7 +312,7 @@ def test_percentile_sampler_needs_no_threshold_to_calibrate():
 
 def test_percentile_sampler_balances_the_two_metrics():
     """Rank-averaging, so pAE's open-ended scale cannot swamp pTM's 0-1."""
-    from examples.impress_r.mpnn import percentile_sampler
+    from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
     corpus = [
         _scored("both_good", 0.95, 2.0),
@@ -325,7 +326,7 @@ def test_percentile_sampler_balances_the_two_metrics():
 
 
 def test_percentile_sampler_floors_the_shard_on_a_small_corpus():
-    from examples.impress_r.mpnn import percentile_sampler
+    from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
     corpus = [_scored(f"d{i}", 0.8 + i * 0.01, 5.0 - i * 0.1) for i in range(6)]
     assert len(percentile_sampler(0.1, min_shard=4)(corpus)) == 4
@@ -335,7 +336,7 @@ def test_percentile_sampler_floors_the_shard_on_a_small_corpus():
 
 def test_percentile_sampler_ranks_on_whatever_the_corpus_carries():
     """A campaign emitting only pTM still ranks; a scoreless one is kept whole."""
-    from examples.impress_r.mpnn import percentile_sampler
+    from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
     ptm_only = [{"uid": f"d{i}", "pTM": 0.5 + i * 0.1} for i in range(4)]
     assert [r["uid"] for r in percentile_sampler(0.5, min_shard=1)(ptm_only)] == ["d3", "d2"]
@@ -346,7 +347,7 @@ def test_percentile_sampler_ranks_on_whatever_the_corpus_carries():
 
 def test_percentile_sampler_reports_the_equivalent_thresholds():
     """on_summary is how a run tells you what a fixed filter would have used."""
-    from examples.impress_r.mpnn import percentile_sampler
+    from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
     seen = {}
     corpus = [_scored(f"d{i}", 0.70 + i * 0.02, 8.0 - i * 0.4) for i in range(10)]
@@ -359,7 +360,7 @@ def test_percentile_sampler_reports_the_equivalent_thresholds():
 
 
 def test_percentile_sampler_rejects_a_nonsense_fraction():
-    from examples.impress_r.mpnn import percentile_sampler
+    from examples.impress_r.protein_binding.mpnn_trainer import percentile_sampler
 
     with pytest.raises(ValueError, match="fraction"):
         percentile_sampler(0.0)
@@ -368,7 +369,7 @@ def test_percentile_sampler_rejects_a_nonsense_fraction():
 
 
 def test_score_percentiles_summarises_what_the_campaign_produced():
-    from examples.impress_r.mpnn import score_percentiles
+    from examples.impress_r.protein_binding.mpnn_trainer import score_percentiles
 
     corpus = [_scored(f"d{i}", 0.5 + i * 0.05, float(i)) for i in range(10)]
     summary = score_percentiles(corpus, keys=("pTM", "pAE", "pLDDT"))
