@@ -31,8 +31,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from dragon.data.ddict import DDict
-from dragon.native.event import Event
+from rome._substrate import DDict, Event, allocate_store
 from radical.asyncflow import WorkflowEngine
 
 from rome._logging import get_logger
@@ -135,7 +134,9 @@ class Manager:
         if ddict is not None:
             self.manager_ddict = ddict
         else:
-            self.manager_ddict = DDict(**{**DEFAULT_DDICT_KWARGS, **(ddict_kwargs or {})})
+            self.manager_ddict = allocate_store(
+                **{**DEFAULT_DDICT_KWARGS, **(ddict_kwargs or {})}
+            )
         self.ns = Namespace(self.manager_ddict, f"{ROME_NS}|")
         self.stop_event = Event()
         self.auto_reload_streams = auto_reload_streams

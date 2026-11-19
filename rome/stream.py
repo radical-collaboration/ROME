@@ -35,8 +35,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from dragon.data.ddict import DDict
-from dragon.native.event import Event
+from rome._substrate import DDict, Event, allocate_store
 
 from rome._logging import get_logger
 from rome.utils import (
@@ -473,7 +472,7 @@ class Stream:
         if config.ddict is not None:
             group_ddict = config.ddict
         else:
-            group_ddict = DDict(
+            group_ddict = allocate_store(
                 **{**DEFAULT_STREAM_DDICT_KWARGS, **(config.ddict_kwargs or {})}
             )
             self._owned[config.name] = group_ddict

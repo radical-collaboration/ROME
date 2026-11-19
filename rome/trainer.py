@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-from dragon.native.event import Event
+from rome._substrate import Event
 
 from rome._logging import get_logger
 from rome.data import DataManager
