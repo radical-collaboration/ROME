@@ -53,7 +53,15 @@ import os
 import threading
 from typing import Any, Dict, MutableMapping
 
-__all__ = ["DDict", "Event", "allocate_store", "require_dragon", "using_dragon"]
+__all__ = [
+    "DDict",
+    "Event",
+    "allocate_store",
+    "dragon_importable",
+    "require_dragon",
+    "store_summary",
+    "using_dragon",
+]
 
 def _runtime_active() -> bool:
     """Is a Dragon *runtime* up, as opposed to a Dragon package being importable?
@@ -73,45 +81,57 @@ def _runtime_active() -> bool:
     return bool(os.environ.get("DRAGON_GS_CD"))
 
 
-_HAVE_DRAGON = False
-_DragonDDict = None  # type: ignore[assignment]
-_DragonEvent = None  # type: ignore[assignment]
+_DDICT_CLASS = None
+_EVENT_CLASS = None
 
-if _runtime_active():  # pragma: no cover - depends on the launcher, not the test
-    try:
-        from dragon.data.ddict import DDict as _DragonDDict
-        from dragon.native.event import Event as _DragonEvent
+try:  # the CLASS being importable is a separate question from a runtime being up
+    from dragon.data.ddict import DDict as _DDICT_CLASS  # type: ignore[no-redef]
+    from dragon.native.event import Event as _EVENT_CLASS  # type: ignore[no-redef]
+except ImportError:
+    pass
 
-        _HAVE_DRAGON = True
-    except ImportError:
-        # Under a Dragon launch with no Dragon package is a broken environment, not a
-        # laptop. Say so rather than silently running single-process inside an allocation.
-        raise RuntimeError(
-            "DRAGON_GS_CD is set, so this process is under a Dragon launch, but "
-            "dragon is not importable. The in-process substrate would run silently "
-            "and single-process inside an allocation; refusing instead."
-        ) from None
+if _runtime_active() and _DDICT_CLASS is None:
+    # Under a Dragon launch with no Dragon package is a broken environment, not a laptop.
+    # Say so rather than silently running single-process inside an allocation.
+    raise RuntimeError(
+        "DRAGON_GS_CD is set, so this process is under a Dragon launch, but dragon is "
+        "not importable. The in-process substrate would run silently and "
+        "single-process inside an allocation; refusing instead."
+    )
 
-
-#: ``threading.Event`` when Dragon is absent. The two are interchangeable for ROME's usage,
-#: which is ``set()``, ``clear()``, ``is_set()`` and ``wait()`` -- the four calls at
+#: Dragon's ``Event`` when its class is importable, else ``threading.Event``. The two are
+#: interchangeable for ROME's usage -- ``set()``, ``clear()``, ``is_set()``, ``wait()``, at
 #: ``manager.py``'s ``stop_event``, ``stream.py``'s ``reload_event``/``stop_event`` and
 #: ``trainer.py``'s ``stop_event``. A Dragon Event additionally crosses process boundaries,
 #: which is the whole difference and the reason the in-process path is single-process.
-Event = _DragonEvent if _HAVE_DRAGON else threading.Event
+Event = _EVENT_CLASS if _EVENT_CLASS is not None else threading.Event
 
 #: Kept bound so annotations like ``Optional[DDict]`` resolve either way. Without Dragon it
 #: is ``MutableMapping``, which is the type ``Namespace`` actually requires.
-DDict = _DragonDDict if _HAVE_DRAGON else MutableMapping
+DDict = _DDICT_CLASS if _DDICT_CLASS is not None else MutableMapping
 
 
 def using_dragon() -> bool:
-    """Is the Dragon substrate live in this interpreter?
+    """Is a Dragon runtime up in this interpreter?
 
     Worth reporting rather than inferring: a log line or a test assertion naming the
     substrate is the difference between "the loop works" and "the loop works here".
     """
-    return _HAVE_DRAGON
+    return _runtime_active()
+
+
+def dragon_importable() -> bool:
+    """Is Dragon's API importable, whether or not a runtime is up?
+
+    A deliberately separate question from :func:`using_dragon`, and the distinction is the
+    one this module got wrong first. ``tests/conftest.py`` installs stub ``DDict`` and
+    ``Event`` classes so the unit suite can exercise the ownership and signalling paths
+    *without* a runtime -- so a selection that keyed on the runtime alone would hand those
+    tests a plain ``dict`` and silently delete their subject. Measured:
+    ``test_stream_manager.py::test_close_releases_allocated_dictionaries`` began failing,
+    because the stream manager's ``_owned`` entries no longer had anything to release.
+    """
+    return _DDICT_CLASS is not None
 
 
 def allocate_store(**ddict_kwargs: Any) -> MutableMapping:
@@ -124,9 +144,18 @@ def allocate_store(**ddict_kwargs: Any) -> MutableMapping:
     mean every caller needed to know which substrate it was on -- which is the coupling this
     module removes.
     """
-    if _HAVE_DRAGON:
-        return _DragonDDict(**ddict_kwargs)
-    return {}
+    if _DDICT_CLASS is None:
+        return {}
+    try:
+        return _DDICT_CLASS(**ddict_kwargs)
+    except Exception:
+        # Dragon's API imports fine outside a launch and then every object asserts on
+        # launch parameters (`Launch parameter not initialized: GS_CD`). Outside a runtime
+        # that is a laptop and the dict is the right answer; inside one it is fatal, and
+        # the refusal above has already fired for the case where the package is missing.
+        if _runtime_active():
+            raise
+        return {}
 
 
 def require_dragon(what: str) -> None:
@@ -136,10 +165,10 @@ def require_dragon(what: str) -> None:
     process, for instance. The failure a caller would otherwise get is an ``AttributeError``
     on a ``dict``, several frames from the cause.
     """
-    if not _HAVE_DRAGON:
+    if not _runtime_active():
         raise RuntimeError(
-            f"{what} requires a Dragon build, and Dragon is not importable here. "
-            "ROME imports and runs single-process without it (see rome._substrate); "
+            f"{what} requires a Dragon runtime, and none is up here (DRAGON_GS_CD unset). "
+            "ROME imports and runs single-process without one (see rome._substrate); "
             "cross-process placement and a shared DDict do not."
         )
 
@@ -147,7 +176,7 @@ def require_dragon(what: str) -> None:
 def store_summary(store: MutableMapping) -> Dict[str, Any]:
     """What a log line should say about the store it is using. Used by the manager at start."""
     return {
-        "substrate": "dragon-ddict" if _HAVE_DRAGON else "in-process-dict",
-        "cross_process": _HAVE_DRAGON,
+        "substrate": "dragon-ddict" if not isinstance(store, dict) else "in-process-dict",
+        "cross_process": _runtime_active(),
         "type": type(store).__name__,
     }
