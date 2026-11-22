@@ -39,7 +39,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 TRAIN_COMPLETE_MARKER = "train_complete"
 
 __all__ = ["run_round", "main", "scaffold_split", "evaluate", "Ensemble", "load_state",
-           "STATE_NAME", "TRAIN_COMPLETE_MARKER"]
+           "preorg_predictor", "STATE_NAME", "TRAIN_COMPLETE_MARKER"]
 
 #: Where a published version keeps its weights. `ModelRegistry.version_dir` reserves the
 #: directory and deliberately prescribes no format -- *"a trainer writes its weights in here
@@ -275,6 +275,37 @@ def load_state(version_dir: str, manifest: Any = None) -> Ensemble:
         net.load_state_dict(weights)
         net.eval()
     return Ensemble(members, job, int(state["n_features"]))
+
+
+def preorg_predictor(version_dir: str, manifest: Any = None):
+    """The `build` a stream is handed: a version directory in, `features -> values` out.
+
+    **The featuriser is `asteer.features.embed`, and that is the whole point of this function.**
+    Model B trains on `LabelRecord.metadata["embedding"]` and impress-a's `preorg_score` client
+    sends `{"structure", "pocket_selection"}`; until 2026-11-22 the only thing that turned one
+    into the other lived in a test harness, where only the serving side could reach it and the
+    corpus side was written by hand to match. Going through `embed` here means a corpus row and
+    a score request agree because they share a function rather than because two copies were
+    kept in step.
+
+    A payload `embed` refuses raises out of the stream, which `streams.serve_requests` turns
+    into a failed response for that request alone. That is the right blast radius: one client
+    sent something unfeaturisable, and the other two surrogates keep serving.
+    """
+    from asteer.features import embed  # noqa: PLC0415
+    from preorg import DEFAULT_PROPERTY  # noqa: PLC0415
+
+    ensemble = load_state(version_dir, manifest)
+    # The property this version regresses on. One per round by design -- the three B predicts
+    # are three regressions sharing a corpus, not one multi-output head -- so the served key
+    # comes from the driver's constant rather than being invented here.
+    prop = DEFAULT_PROPERTY
+
+    def predict(features):
+        (mean,), (sigma,) = ensemble([embed(features)])
+        return {prop: mean}, {prop: sigma}
+
+    return predict
 
 
 # -- the fit (the only torch in this example) --------------------------------
