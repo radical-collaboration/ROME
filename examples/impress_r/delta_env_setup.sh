@@ -26,6 +26,7 @@
 #   --env-dir     DIR   venv location       (overrides use-case default)
 #   --impress-dir DIR   IMPRESS source tree  (default: $WORK_DIR/IMPRESS)
 #   --rome-dir    DIR   ROME source tree     (default: $WORK_DIR/ROME)
+#   ASTEER_DIR          asteer source tree   (default: $WORK_DIR/autoagent_steered_diffusion)
 # =============================================================================
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     set -euo pipefail
@@ -106,6 +107,26 @@ fi
 "${PIP}" install -q -e "${ROME_DIR}"
 echo "  ROME installed from ${ROME_DIR}"
 
+# ── 2a. asteer (the ASD seam) ─────────────────────────────────────────────────
+# The ASD surrogate example (examples/impress/small_molecule_binding/) takes its
+# corpus from asteer.labels rather than from DataManager's watermark: a sampler
+# selects a non-contiguous subset and no watermark value describes one. asteer
+# declares no dependencies, so this costs nothing to install and nothing to
+# import. A WARNING rather than an error, because every other pipeline here runs
+# without it.
+echo ""
+echo "── Step 2a: asteer (ASD contracts and label queue) ──"
+ASTEER_DIR="${ASTEER_DIR:-${WORK_DIR}/autoagent_steered_diffusion}"
+if [ -d "${ASTEER_DIR}" ]; then
+    "${PIP}" install -q -e "${ASTEER_DIR}"
+    echo "  asteer installed from ${ASTEER_DIR}"
+else
+    echo "  [WARN] ASTEER_DIR not found: ${ASTEER_DIR}"
+    echo "         examples/impress/small_molecule_binding/ will not import, and"
+    echo "         its tests skip rather than fail. Clone it there or export"
+    echo "         ASTEER_DIR."
+fi
+
 # ── 2b. itgt (interface_targeting only) ───────────────────────────────────────
 if [ "${_INSTALL_ITGT:-}" = "yes" ]; then
     echo ""
@@ -140,6 +161,9 @@ _check() {
 }
 _check "impress" "${PY}" -c "import impress; print('ok')"
 _check "rome"    "${PY}" -c "import rome; print('ok')"
+if [ -d "${ASTEER_DIR}" ]; then
+    _check "asteer" "${PY}" -c "import asteer.labels; print('ok')"
+fi
 if [ "${_INSTALL_ITGT:-}" = "yes" ]; then
     _check "itgt" "${PY}" -c "import itgt; print('ok')"
 fi
