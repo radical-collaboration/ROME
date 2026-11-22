@@ -43,8 +43,15 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 TRAIN_COMPLETE_MARKER = "train_complete"
 
-__all__ = ["ReplayBuffer", "run_round", "main", "evaluate", "itgt_head",
-           "TRAIN_COMPLETE_MARKER"]
+__all__ = ["ReplayBuffer", "run_round", "main", "evaluate", "itgt_head", "load_state",
+           "STATE_NAME", "TRAIN_COMPLETE_MARKER"]
+
+#: Where a published version keeps its head, as an `itgt` artifact directory rather than a
+#: bare state dict. `itgt.common.artifacts` records the feature columns a model was fit on
+#: and **raises** at load time when the caller would feed it a different list -- a head
+#: loaded against reordered columns still runs and still returns finite numbers, so that
+#: check is the whole reason to use their format rather than `torch.save`.
+STATE_NAME = "head"
 
 #: Quality per bag, in the order the bags were handed over. Comparable within a group only.
 Scorer = Callable[[Sequence[Dict[str, Any]]], List[float]]
@@ -124,8 +131,13 @@ def itgt_head(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Scorer:
                               normalize="zscore")
     dataset_config = _dataset_config(job)
     train_config = TrainConfig(epochs=int(job["epochs"]), seed=int(job["seed"]), device="cpu")
+    # `out` is `train_head`'s own artifact write, which records the scorer, the scoring
+    # config, the feature columns and the corpus fingerprint. Reconstructing that meta here
+    # would be a second copy of itgt's provenance, drifting one field at a time. Only the
+    # final all-data fit names an `out`; the leave-one-group-out folds do not.
     model, _ = train_head(_corpus(train, job), scoring, str(job["scorer"]),
-                          dataset_config=dataset_config, train_config=train_config)
+                          dataset_config=dataset_config, train_config=train_config,
+                          out=job.get("artifact_out") or None)
     model.eval()
 
     def score(rows: Sequence[Dict[str, Any]]) -> List[float]:
@@ -192,6 +204,36 @@ def _corpus(rows: Sequence[Dict[str, Any]], job: Dict[str, Any]):
             uid=str(row["action_id"]),
         ))
     return Corpus(records)
+
+
+def load_state(version_dir: str, manifest: Any = None):
+    """A version directory in, a bag scorer out, through `itgt`'s own loader.
+
+    Raises when the directory holds no head, which `streams.load_promoted` turns into an
+    `Unavailable` naming the directory.
+    """
+    path = os.path.join(version_dir, STATE_NAME)
+    if not os.path.isdir(path):
+        raise FileNotFoundError(
+            f"no {STATE_NAME}/ in {version_dir}: this version was published with a manifest "
+            "and no head, so there is nothing to serve"
+        )
+    from itgt.common import artifacts  # noqa: PLC0415
+
+    # The cheapest check first, and before any weights are read. `itgt` reserves "proxy" for
+    # its synthetic quality function and `evaluate.compare_to_baseline` refuses to compare a
+    # proxy-fit artifact against a campaign-scored one; serving one into a campaign would
+    # route around that refusal entirely.
+    meta = artifacts.read_meta(path)
+    if meta.is_proxy:
+        raise ValueError(
+            f"{path} was fit on itgt's proxy labels (scorer={meta.scorer!r}); a campaign "
+            "must not be steered by a model that never saw a campaign label"
+        )
+    from itgt.method2_hotspots import infer  # noqa: PLC0415
+
+    model, _ = infer.load(path)
+    return model
 
 
 # -- the evaluation ----------------------------------------------------------
@@ -291,8 +333,19 @@ def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
     banked = buffer.append(job.get("pairs") or [])
     pairs = buffer.load()
 
+    weights = "none"
     if job.get("head_enabled"):
-        report = evaluate(pairs, job, fit or itgt_head)
+        fitter = fit or itgt_head
+        report = evaluate(pairs, job, fitter)
+        if report["validated"]:
+            # The evaluated model and the published model are two different fits: the folds
+            # measure, the final fit on every banked pair is what gets served.
+            version_dir = _version_dir(job)
+            os.makedirs(version_dir, exist_ok=True)
+            fitter([p for p in pairs if p.get("outcome_value") is not None],
+                   {**job, "artifact_out": os.path.join(version_dir, STATE_NAME)})
+            if os.path.isdir(os.path.join(version_dir, STATE_NAME)):
+                weights = STATE_NAME + "/"
     else:
         report = {
             "nll": None, "calibration": None, "logo_r2": None, "holdout_n": 0,
@@ -302,6 +355,7 @@ def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
             # cannot steer -- which is the mechanism, not a convention anyone has to keep.
             "reason": "head disabled: this round banks pairs and publishes nothing steerable",
         }
+    report["weights"] = weights
     elapsed = time.process_time() - started
 
     version = _publish(job, report, elapsed)
@@ -321,8 +375,7 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
     from asteer.registry import ModelRegistry  # noqa: PLC0415
 
     registry = ModelRegistry(job["registry_root"])
-    existing = registry.versions(job["model_id"])
-    version = (max(existing) + 1) if existing else 0
+    version = _next_version(job)
     accuracy = report.get("rank_accuracy")
     registry.publish(ModelManifest(
         model_id=job["model_id"],
@@ -347,11 +400,28 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
             f"groups={report['n_groups']}",
             # Not "frozen": see the module docstring on the one gap this adaptation leaves.
             "encoder=trained_end_to_end" if job.get("head_enabled") else "",
+            # What a stream will find in this version's directory.
+            f"weights={report.get('weights', 'none')}",
             "" if accuracy is None else f"rank_accuracy={accuracy:.3f}",
             report["reason"],
         ])).strip(),
     ))
     return version
+
+
+def _registry(job: Dict[str, Any]):
+    from asteer.registry import ModelRegistry  # noqa: PLC0415
+
+    return ModelRegistry(job["registry_root"])
+
+
+def _next_version(job: Dict[str, Any]) -> int:
+    existing = _registry(job).versions(job["model_id"])
+    return (max(existing) + 1) if existing else 0
+
+
+def _version_dir(job: Dict[str, Any]) -> str:
+    return str(_registry(job).version_dir(job["model_id"], _next_version(job)))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

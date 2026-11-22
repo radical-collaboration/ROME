@@ -324,3 +324,88 @@ def test_the_real_ensemble_reports_two_uncertainties(tmp_path):
     mean, sigma = predict([[0.0, 1.0], [4.0, 1.0]])
     assert len(mean) == len(sigma) == 2
     assert all(s > 0.0 for s in sigma), "a zero sigma would make the NLL infinite"
+
+
+# -- the weights (item 52) ---------------------------------------------------
+
+
+class _Recording:
+    """`_linear_fit`, with the size of every training set it was handed recorded."""
+
+    def __init__(self):
+        self.sizes: list[int] = []
+
+    def __call__(self, train, job):
+        self.sizes.append(len(train))
+        return _linear_fit(train, job)
+
+
+def test_the_published_model_is_fitted_on_everything_the_evaluated_one_is_not(tmp_path):
+    """Two fits, on purpose. The metrics come from a scaffold-cluster holdout and from
+    leave-one-group-out, because a number read off the data a model was fitted on is not a
+    measurement. The weights come from a fit on the whole corpus, because throwing away a
+    fifth of twenty labels in the model that actually gets served pays for honesty twice."""
+    fit = _Recording()
+    corpus = _corpus()
+    run_round(_job(tmp_path, corpus), fit=fit)
+    assert fit.sizes, "the fitter ran"
+    assert fit.sizes[-1] == len(corpus), (
+        f"the last fit saw {fit.sizes[-1]} of {len(corpus)} examples; the published weights "
+        "must be the all-data fit, not the holdout's"
+    )
+    assert min(fit.sizes[:-1]) < len(corpus), "the evaluated fits held something out"
+
+
+def test_a_fitter_that_cannot_be_saved_publishes_no_weights_and_says_so(tmp_path):
+    """A stub returns a closure, which holds weights nowhere. The manifest says `none`
+    rather than leaving a stream to discover it."""
+    job = _job(tmp_path, _corpus())
+    run_round(job, fit=_linear_fit)
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("pocket_preorg", 0)
+    assert "weights=none" in manifest.notes
+    assert os.listdir(os.path.join(job["registry_root"], "pocket_preorg", "v0")) == [
+        "manifest.json"]
+
+
+def test_loading_a_version_that_has_no_weights_refuses(tmp_path):
+    from examples.impress.small_molecule_binding.preorg_train_wrapper import load_state
+
+    job = _job(tmp_path, _corpus())
+    run_round(job, fit=_linear_fit)
+    version_dir = os.path.join(job["registry_root"], "pocket_preorg", "v0")
+    with pytest.raises(FileNotFoundError, match="nothing to serve"):
+        load_state(version_dir)
+
+
+def test_an_unloadable_promoted_version_reaches_a_stream_as_an_outage(tmp_path):
+    """The seam into EII.5: `streams.load_promoted` turns the refusal above into an
+    `Unavailable` naming the directory, rather than a crashed stream or a plausible number."""
+    from asteer.contracts import PromotionDecision, PromotionOutcome
+
+    from examples.impress.small_molecule_binding.preorg_train_wrapper import load_state
+    from examples.impress.small_molecule_binding.streams import Unavailable, load_promoted
+
+    job = _job(tmp_path, _corpus())
+    run_round(job, fit=_linear_fit)
+    ModelRegistry(job["registry_root"]).promote(PromotionDecision(
+        decision_id="d0", model_id="pocket_preorg", to_version=0,
+        outcome=PromotionOutcome.PROMOTE, decided_at="2026-11-21T00:00:00Z"))
+    served = load_promoted(None, None, model_id="pocket_preorg",
+                           registry_root=job["registry_root"], build=load_state)
+    assert isinstance(served, Unavailable) and "did not load" in served.reason
+
+
+def test_the_real_ensemble_is_written_and_loads_back(tmp_path):
+    pytest.importorskip("torch.nn", reason="the wrapper's own dependency")
+    from examples.impress.small_molecule_binding.preorg_train_wrapper import load_state
+
+    job = _job(tmp_path, _corpus(), epochs=40)
+    run_round(job)
+    version_dir = os.path.join(job["registry_root"], "pocket_preorg", "v0")
+    assert sorted(os.listdir(version_dir)) == ["ensemble.pt", "manifest.json"]
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("pocket_preorg", 0)
+    assert "weights=ensemble.pt" in manifest.notes
+    loaded = load_state(version_dir, manifest)
+    mean, sigma = loaded([[1.0, 1.0]])
+    assert abs(mean[0] - 2.0) < 1.0, "the corpus is y = 2*x0"
+    assert sigma[0] > 0.0, "an ensemble that reports zero spread is reporting nothing"

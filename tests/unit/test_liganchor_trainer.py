@@ -15,6 +15,7 @@ Skipped without `asteer`: a sibling checkout rather than a declared ROME depende
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -437,3 +438,111 @@ def test_the_real_itgt_head_ranks_a_corpus_it_was_fitted_on(tmp_path):
         f"the head ranked {correct}/{total} of the pairs it was fitted on correctly; below "
         "this the corpus is not one `train_head` can learn from at all"
     )
+
+
+# -- the weights (item 52) ---------------------------------------------------
+
+
+def test_a_banking_round_publishes_no_weights_because_it_fitted_nothing(tmp_path):
+    job = _job(tmp_path, head_enabled=False)
+    run_round(job, fit=_StubHead())
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("lig_anchor", 0)
+    assert "weights=none" in manifest.notes
+    assert os.listdir(os.path.join(job["registry_root"], "lig_anchor", "v0")) == [
+        "manifest.json"]
+
+
+def test_the_published_head_is_fitted_on_every_banked_pair(tmp_path):
+    """The folds measure; the final fit on the whole buffer is what gets served."""
+    fit = _StubHead()
+    job = _job(tmp_path, head_enabled=True)
+    run_round(job, fit=fit)
+    assert fit.calls[-1] == 16, (
+        f"the last fit saw {fit.calls[-1]} of 16 pairs; the published head must be the "
+        "all-buffer fit, not a fold's"
+    )
+    assert all(n < 16 for n in fit.calls[:-1]), "the folds held a group out"
+
+
+def test_the_final_fit_is_told_where_to_write_its_artifact(tmp_path):
+    """`itgt`'s `train_head` writes the artifact itself, recording the scorer, the scoring
+    config, the feature columns and the corpus fingerprint. Reconstructing that meta here
+    would be a second copy of itgt's provenance, drifting one field at a time."""
+    seen: list = []
+
+    def recording(train, job):
+        seen.append(job.get("artifact_out"))
+        return _StubHead()(train, job)
+
+    job = _job(tmp_path, head_enabled=True)
+    run_round(job, fit=recording)
+    assert seen[-1] and seen[-1].endswith(os.path.join("lig_anchor", "v0", "head"))
+    assert all(o is None for o in seen[:-1]), "a fold must not write the published artifact"
+
+
+def test_loading_a_version_that_has_no_head_refuses(tmp_path):
+    from examples.impress.small_molecule_binding.liganchor_train_wrapper import load_state
+
+    job = _job(tmp_path, head_enabled=False)
+    run_round(job, fit=_StubHead())
+    with pytest.raises(FileNotFoundError, match="nothing to serve"):
+        load_state(os.path.join(job["registry_root"], "lig_anchor", "v0"))
+
+
+def test_the_real_head_is_written_as_an_itgt_artifact_and_loads_back(tmp_path):
+    if not (ITGT / "itgt" / "method2_hotspots" / "train.py").exists():
+        pytest.skip("the interface-targeting checkout is not beside us")
+    pytest.importorskip("torch.nn", reason="itgt's [ml] extra")
+    pytest.importorskip("gemmi", reason="itgt reads structures with gemmi")
+    sys.path.insert(0, str(ITGT))
+    sys.path.insert(0, str(ITGT / "examples"))
+    from synthetic_ligand import write
+
+    from examples.impress.small_molecule_binding.liganchor_train_wrapper import load_state
+
+    import random
+    rng = random.Random(7)
+    rows = []
+    for group, kwargs in (("g1", {"n_ring": 10, "seed": 0}),
+                          ("g2", {"n_ring": 8, "radius": 3.4, "seed": 1})):
+        structure = str(tmp_path / f"{group}.pdb")
+        truth = write(structure, **kwargs)
+        ring, interface = truth["ring_names"], set(truth["interface_ligand_atoms"])
+        for k in range(8):
+            atoms = sorted(rng.sample(ring, 4))
+            hits = len(set(atoms) & interface)
+            rows.append(_record(len(rows), atoms, -7.0 - 0.8 * hits + 0.01 * k,
+                                group=group,
+                                action=_action(atoms, structure=structure)))
+
+    job = _job(tmp_path, rows, head_enabled=True, epochs=10)
+    run_round(job)
+    version_dir = os.path.join(job["registry_root"], "lig_anchor", "v0")
+    assert sorted(os.listdir(version_dir)) == ["head", "manifest.json"]
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("lig_anchor", 0)
+    assert "weights=head/" in manifest.notes
+
+    meta = json.loads(Path(version_dir, "head", "meta.json").read_text())
+    assert meta["kind"] == "MILHead"
+    assert meta["scorer"] == "asd:dg_abfe", (
+        "itgt refuses to compare a proxy-fit artifact against a campaign-scored one, which "
+        "only works if a campaign round names itself"
+    )
+    assert type(load_state(version_dir, manifest)).__name__ == "MILHead"
+
+
+def test_a_proxy_fit_head_is_refused_at_load(tmp_path):
+    """A model fitted on `itgt`'s synthetic quality function must not steer a campaign.
+    itgt's own guard is `evaluate.compare_to_baseline`; serving one would route around it."""
+    from examples.impress.small_molecule_binding.liganchor_train_wrapper import load_state
+
+    version_dir = tmp_path / "lig_anchor" / "v0" / "head"
+    version_dir.mkdir(parents=True)
+    (version_dir / "meta.json").write_text(json.dumps(
+        {"method": "hotspots", "kind": "MILHead", "scorer": "proxy", "format": "torch"}))
+    (version_dir / "state.pt").write_bytes(b"")
+    if not (ITGT / "itgt").exists():
+        pytest.skip("the interface-targeting checkout is not beside us")
+    sys.path.insert(0, str(ITGT))
+    with pytest.raises(ValueError, match="proxy labels"):
+        load_state(str(version_dir.parent))

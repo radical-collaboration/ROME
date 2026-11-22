@@ -312,3 +312,84 @@ def test_the_real_botorch_gp_returns_a_posterior_with_a_usable_sigma(tmp_path):
     assert len(mean) == len(sigma) == 2
     assert all(s > 0.0 for s in sigma)
     assert sigma[1] > sigma[0], "a point far outside the labels must be less certain"
+
+
+# -- the weights (item 52) ---------------------------------------------------
+
+
+class _RecordingGP:
+    """`_stub_gp`, with the size of every training set it was handed recorded."""
+
+    def __init__(self):
+        self.sizes: list[int] = []
+
+    def __call__(self, train, job):
+        self.sizes.append(len(train))
+        return _stub_gp(train, job)
+
+
+def test_the_published_gp_saw_every_label_the_evaluated_ones_did_not(tmp_path):
+    """Leave-one-out measures; the final fit on all the labels is what gets served. A
+    version that had seen eleven of twelve measurements would be throwing away one that
+    cost an allocation."""
+    fit = _RecordingGP()
+    corpus = _corpus()
+    run_round(_job(tmp_path, corpus), fit=fit)
+    assert fit.sizes[-1] == len(corpus)
+    assert all(n == len(corpus) - 1 for n in fit.sizes[:-1]), "leave-one-out, n times"
+
+
+def test_a_round_below_the_floor_publishes_no_weights(tmp_path):
+    """No GP was fitted, so there is nothing to write, and the manifest says so rather than
+    leaving a stream to find an empty directory."""
+    job = _job(tmp_path, _corpus(3))
+    run_round(job, fit=_stub_gp)
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("aff_delta", 0)
+    assert "weights=none" in manifest.notes
+    assert manifest.has_heldout_metrics is False
+
+
+def test_loading_a_version_that_has_no_weights_refuses(tmp_path):
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import load_state
+
+    job = _job(tmp_path, _corpus(3))
+    run_round(job, fit=_stub_gp)
+    with pytest.raises(FileNotFoundError, match="nothing to serve"):
+        load_state(os.path.join(job["registry_root"], "aff_delta", "v0"))
+
+
+def test_the_real_gp_is_written_with_the_residual_it_corrected(tmp_path):
+    """The residual is **copied** in, not referenced. A path recorded in a manifest can be
+    moved or refitted, and then 'v0 corrects public residual R' stops being checkable."""
+    pytest.importorskip("botorch", reason="botorch is the wrapper's dependency")
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import (
+        RESIDUAL_NAME,
+        load_state,
+    )
+
+    job = _job(tmp_path, _corpus())
+    run_round(job)
+    version_dir = os.path.join(job["registry_root"], "aff_delta", "v0")
+    assert sorted(os.listdir(version_dir)) == ["gp.pt", "manifest.json", "residual.json"]
+    assert json.loads(Path(version_dir, RESIDUAL_NAME).read_text())["version"] == 3
+
+    loaded = load_state(version_dir)
+    mean, sigma = loaded([[1.0, 0.5]])
+    assert sigma[0] > 0.0
+    fresh = botorch_gp_on(job, _corpus())
+    assert abs(mean[0] - fresh[0][0]) < 1e-6, "a load is not a refit; it reproduces this fit"
+
+
+def botorch_gp_on(job, corpus):
+    """The same fit again, to show the saved one is the one that comes back."""
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import (
+        Residual,
+        botorch_gp,
+    )
+
+    residual = Residual.load(job["residual_path"])
+    rows = []
+    for example in job["examples"]:
+        z = residual.project(example["x"])
+        rows.append({**example, "z": z, "residual": example["y"] - residual.predict(z)})
+    return botorch_gp(rows, job)([[1.0, 0.5]])

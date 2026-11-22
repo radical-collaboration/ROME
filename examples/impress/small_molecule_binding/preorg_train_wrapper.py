@@ -38,7 +38,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 #: ROME and can be run as a bare script on an allocation.
 TRAIN_COMPLETE_MARKER = "train_complete"
 
-__all__ = ["run_round", "main", "scaffold_split", "evaluate", "TRAIN_COMPLETE_MARKER"]
+__all__ = ["run_round", "main", "scaffold_split", "evaluate", "Ensemble", "load_state",
+           "STATE_NAME", "TRAIN_COMPLETE_MARKER"]
+
+#: Where a published version keeps its weights. `ModelRegistry.version_dir` reserves the
+#: directory and deliberately prescribes no format -- *"a trainer writes its weights in here
+#: in whatever shape it likes"* -- so the name is the trainer's to declare and the stream's
+#: loader to read.
+STATE_NAME = "ensemble.pt"
 
 Predictor = Callable[[Sequence[Sequence[float]]], Tuple[List[float], List[float]]]
 Fitter = Callable[[List[Dict[str, Any]], Dict[str, Any]], Predictor]
@@ -186,7 +193,94 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], fit: Fitter,
 # -- the fit (the only torch in this example) --------------------------------
 
 
-def torch_ensemble(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Predictor:
+def _nets(n_features: int, job: Dict[str, Any]):
+    """The architecture, built in one place so a load rebuilds exactly what a fit built.
+
+    Two copies of a layer stack is how a checkpoint comes to load into the wrong shape and
+    still produce finite numbers -- `torch.load` would raise on a size mismatch, but a
+    changed activation or a changed output width would not.
+    """
+    from torch import nn  # noqa: PLC0415
+
+    members = []
+    for _ in range(int(job["n_members"])):
+        layers: List[Any] = []
+        width = n_features
+        for hidden in job["hidden"]:
+            layers += [nn.Linear(width, int(hidden)), nn.SiLU()]
+            width = int(hidden)
+        members.append(nn.Sequential(*layers, nn.Linear(width, 2)))
+    return members
+
+
+class Ensemble:
+    """Five nets, callable as a `Predictor` and writable to a version directory.
+
+    A class rather than the closure this used to return, because a closure is a `Predictor`
+    and nothing else: the weights it holds cannot be written anywhere, so every round's model
+    died with the process that fitted it (backlog item 52).
+    """
+
+    def __init__(self, members: List[Any], job: Dict[str, Any], n_features: int) -> None:
+        self.members = members
+        self.hidden = [int(h) for h in job["hidden"]]
+        self.n_members = int(job["n_members"])
+        self.n_features = int(n_features)
+
+    def __call__(self, rows: Sequence[Sequence[float]]) -> Tuple[List[float], List[float]]:
+        import torch  # noqa: PLC0415
+
+        with torch.no_grad():
+            grid = torch.tensor(list(rows), dtype=torch.float32)
+            means, variances = [], []
+            for net in self.members:
+                out = net(grid)
+                means.append(out[:, 0])
+                variances.append(out[:, 1].clamp(-6.0, 4.0).exp())
+            stacked = torch.stack(means)
+            mu = stacked.mean(0)
+            # Total variance = mean aleatoric + spread of the means (epistemic).
+            var = torch.stack(variances).mean(0) + stacked.var(0, unbiased=False)
+            return mu.tolist(), var.clamp(min=1e-12).sqrt().tolist()
+
+    def save(self, version_dir: str) -> str:
+        import torch  # noqa: PLC0415
+
+        path = os.path.join(version_dir, STATE_NAME)
+        torch.save({"hidden": self.hidden, "n_members": self.n_members,
+                    "n_features": self.n_features,
+                    "members": [m.state_dict() for m in self.members]}, path)
+        return STATE_NAME
+
+
+def load_state(version_dir: str, manifest: Any = None) -> Ensemble:
+    """The `build` a stream hands `surrogate_stream`: a version directory in, a predictor out.
+
+    Raises when the directory holds no weights, which `streams.load_promoted` turns into an
+    `Unavailable` naming the directory. A loader that fell back to an untrained ensemble would
+    serve a confident-looking sigma from no evidence at all.
+    """
+    import torch  # noqa: PLC0415
+
+    path = os.path.join(version_dir, STATE_NAME)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"no {STATE_NAME} in {version_dir}: this version was published with a manifest "
+            "and no weights, so there is nothing to serve"
+        )
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    job = {"n_members": state["n_members"], "hidden": state["hidden"]}
+    members = _nets(int(state["n_features"]), job)
+    for net, weights in zip(members, state["members"]):
+        net.load_state_dict(weights)
+        net.eval()
+    return Ensemble(members, job, int(state["n_features"]))
+
+
+# -- the fit (the only torch in this example) --------------------------------
+
+
+def torch_ensemble(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Ensemble:
     """A deep ensemble with a heteroscedastic Gaussian head.
 
     Two uncertainties, and they are different things. The head's `log_var` is **aleatoric** --
@@ -199,19 +293,15 @@ def torch_ensemble(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Predicto
     on whatever it fits first and the loss follows it down, which looks like convergence.
     """
     import torch  # noqa: PLC0415
-    from torch import nn  # noqa: PLC0415
 
     x = torch.tensor([e["x"] for e in train], dtype=torch.float32)
     y = torch.tensor([e["y"] for e in train], dtype=torch.float32).unsqueeze(-1)
-    members = []
-    for member in range(int(job["n_members"])):
+    members = _nets(int(x.shape[1]), job)
+    for member, net in enumerate(members):
         torch.manual_seed(int(job["seed"]) + member)
-        layers: List[nn.Module] = []
-        width = x.shape[1]
-        for hidden in job["hidden"]:
-            layers += [nn.Linear(width, int(hidden)), nn.SiLU()]
-            width = int(hidden)
-        net = nn.Sequential(*layers, nn.Linear(width, 2))
+        for layer in net:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
         optimiser = torch.optim.Adam(net.parameters(), lr=float(job["learning_rate"]))
         for _ in range(int(job["epochs"])):
             optimiser.zero_grad()
@@ -221,35 +311,40 @@ def torch_ensemble(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Predicto
             loss.backward()
             optimiser.step()
         net.eval()
-        members.append(net)
-
-    def predict(rows: Sequence[Sequence[float]]) -> Tuple[List[float], List[float]]:
-        with torch.no_grad():
-            grid = torch.tensor(list(rows), dtype=torch.float32)
-            means, variances = [], []
-            for net in members:
-                out = net(grid)
-                means.append(out[:, 0])
-                variances.append(out[:, 1].clamp(-6.0, 4.0).exp())
-            stacked = torch.stack(means)
-            mu = stacked.mean(0)
-            # Total variance = mean aleatoric + spread of the means (epistemic).
-            var = torch.stack(variances).mean(0) + stacked.var(0, unbiased=False)
-            return mu.tolist(), var.clamp(min=1e-12).sqrt().tolist()
-
-    return predict
+    return Ensemble(members, job, int(x.shape[1]))
 
 
 # -- the round ---------------------------------------------------------------
 
 
 def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
-    """Fit, evaluate, publish unpromoted, and write the marker last."""
+    """Evaluate held out, fit on everything, write the weights, publish unpromoted.
+
+    **The evaluated model and the published model are two different fits, on purpose.** The
+    metrics come from a scaffold-cluster holdout and from leave-one-group-out, because a
+    number read off the data a model was fitted on is not a measurement. The weights come
+    from a final fit on the whole corpus, because throwing away a fifth of twenty labels in
+    the model that actually gets served would be paying for honesty twice.
+
+    **The weights land before the manifest.** `ModelRegistry.promoted` is what a stream
+    reads, and a version is only visible to `versions()` once its manifest exists -- so
+    writing the weights first means no reader can ever see a published version that has none.
+    """
     started = time.process_time()
     output_dir = job["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
     examples = list(job["examples"])
-    report = evaluate(examples, job, fit or torch_ensemble)
+    fitter = fit or torch_ensemble
+    report = evaluate(examples, job, fitter)
+
+    weights = "none"
+    if len(examples) >= 2:
+        final = fitter(examples, job)
+        saver = getattr(final, "save", None)
+        if saver is not None:
+            os.makedirs(_version_dir(job), exist_ok=True)
+            weights = saver(_version_dir(job))
+    report["weights"] = weights
     elapsed = time.process_time() - started
 
     version = _publish(job, report, elapsed)
@@ -260,6 +355,21 @@ def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
     with open(os.path.join(output_dir, TRAIN_COMPLETE_MARKER), "w") as fh:
         fh.write(str(version))
     return output_dir
+
+
+def _registry(job: Dict[str, Any]):
+    from asteer.registry import ModelRegistry  # noqa: PLC0415
+
+    return ModelRegistry(job["registry_root"])
+
+
+def _next_version(job: Dict[str, Any]) -> int:
+    existing = _registry(job).versions(job["model_id"])
+    return (max(existing) + 1) if existing else 0
+
+
+def _version_dir(job: Dict[str, Any]) -> str:
+    return str(_registry(job).version_dir(job["model_id"], _next_version(job)))
 
 
 def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int:
@@ -274,8 +384,7 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
     from asteer.registry import ModelRegistry  # noqa: PLC0415
 
     registry = ModelRegistry(job["registry_root"])
-    existing = registry.versions(job["model_id"])
-    version = (max(existing) + 1) if existing else 0
+    version = _next_version(job)
     manifest = ModelManifest(
         model_id=job["model_id"],
         version=version,
@@ -296,6 +405,9 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
             str(job.get("notes") or ""),
             f"property={job['property_name']}",
             f"groups={report['n_groups']}",
+            # What a stream will find in this version's directory. "none" is the honest
+            # answer for a round that produced no model, and is what item 52 was about.
+            f"weights={report.get('weights', 'none')}",
             report["reason"],
         ])).strip(),
     )

@@ -34,8 +34,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 TRAIN_COMPLETE_MARKER = "train_complete"
 
-__all__ = ["run_round", "main", "Residual", "evaluate", "botorch_gp",
-           "TRAIN_COMPLETE_MARKER"]
+__all__ = ["run_round", "main", "Residual", "evaluate", "botorch_gp", "GP", "load_state",
+           "STATE_NAME", "RESIDUAL_NAME", "TRAIN_COMPLETE_MARKER"]
+
+#: This version's weights and the prior they correct, both inside the version directory.
+#: The residual is **copied** rather than referenced: a path recorded in a manifest can be
+#: moved or refitted, and then "v3 corrects public residual R" stops being checkable.
+STATE_NAME = "gp.pt"
+RESIDUAL_NAME = "residual.json"
 
 Posterior = Callable[[Sequence[Sequence[float]]], Tuple[List[float], List[float]]]
 Fitter = Callable[[List[Dict[str, Any]], Dict[str, Any]], Posterior]
@@ -88,7 +94,73 @@ class Residual:
 # -- the fit (the only heavy import in this example's C half) ----------------
 
 
-def botorch_gp(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Posterior:
+class GP:
+    """A fitted `SingleTaskGP`, callable as a `Posterior` and writable to a version directory.
+
+    A class rather than the closure this used to return, because a closure is a posterior and
+    nothing else: the fit it holds could not be written anywhere, so every round's model died
+    with the process that fitted it (backlog item 52).
+
+    What is saved is the training data **and** the fitted hyperparameters. A GP is defined by
+    both -- re-fitting from the data at load time would re-run the marginal-likelihood
+    optimisation and could land somewhere else, which is a different model wearing the same
+    version number.
+    """
+
+    def __init__(self, model: Any, x: Any, y: Any, yvar: Any) -> None:
+        self.model = model
+        self.x, self.y, self.yvar = x, y, yvar
+
+    def __call__(self, rows: Sequence[Sequence[float]]) -> Tuple[List[float], List[float]]:
+        import torch  # noqa: PLC0415
+
+        with torch.no_grad():
+            post = self.model.posterior(torch.tensor(list(rows), dtype=torch.double))
+            mean = post.mean.squeeze(-1).tolist()
+            sigma = post.variance.clamp_min(1e-12).sqrt().squeeze(-1).tolist()
+        return list(mean), list(sigma)
+
+    def save(self, version_dir: str) -> str:
+        import torch  # noqa: PLC0415
+
+        torch.save({"x": self.x, "y": self.y, "yvar": self.yvar,
+                    "state_dict": self.model.state_dict()},
+                   os.path.join(version_dir, STATE_NAME))
+        return STATE_NAME
+
+
+def _single_task_gp(x: Any, y: Any, yvar: Any):
+    """The construction, in one place so a load rebuilds exactly what a fit built."""
+    from botorch.models import SingleTaskGP  # noqa: PLC0415
+    from botorch.models.transforms.outcome import Standardize  # noqa: PLC0415
+
+    return SingleTaskGP(x, y, train_Yvar=yvar, outcome_transform=Standardize(m=1))
+
+
+def load_state(version_dir: str, manifest: Any = None) -> GP:
+    """A version directory in, a posterior out, with **no refit**.
+
+    Raises when the directory holds no weights, which `streams.load_promoted` turns into an
+    `Unavailable` naming the directory. A loader that refitted from the saved data instead
+    would re-run the hyperparameter optimisation and could serve a different model under the
+    same version number.
+    """
+    import torch  # noqa: PLC0415
+
+    path = os.path.join(version_dir, STATE_NAME)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"no {STATE_NAME} in {version_dir}: this version was published with a manifest "
+            "and no weights, so there is nothing to serve"
+        )
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    model = _single_task_gp(state["x"], state["y"], state["yvar"])
+    model.load_state_dict(state["state_dict"])
+    model.eval()
+    return GP(model, state["x"], state["y"], state["yvar"])
+
+
+def botorch_gp(train: List[Dict[str, Any]], job: Dict[str, Any]) -> GP:
     """A Matérn-5/2 GP with **known** per-point noise, on the residual's basis.
 
     botorch's `SingleTaskGP` defaults to a scaled Matérn-5/2 with ARD, which is the kernel the
@@ -103,26 +175,16 @@ def botorch_gp(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Posterior:
     """
     import torch  # noqa: PLC0415
     from botorch.fit import fit_gpytorch_mll  # noqa: PLC0415
-    from botorch.models import SingleTaskGP  # noqa: PLC0415
-    from botorch.models.transforms.outcome import Standardize  # noqa: PLC0415
     from gpytorch.mlls import ExactMarginalLogLikelihood  # noqa: PLC0415
 
     torch.manual_seed(int(job.get("seed", 0)))
     x = torch.tensor([e["z"] for e in train], dtype=torch.double)
     y = torch.tensor([[e["residual"]] for e in train], dtype=torch.double)
     yvar = torch.tensor([[e["noise"] ** 2] for e in train], dtype=torch.double)
-    model = SingleTaskGP(x, y, train_Yvar=yvar, outcome_transform=Standardize(m=1))
+    model = _single_task_gp(x, y, yvar)
     fit_gpytorch_mll(ExactMarginalLogLikelihood(model.likelihood, model))
     model.eval()
-
-    def posterior(rows: Sequence[Sequence[float]]) -> Tuple[List[float], List[float]]:
-        with torch.no_grad():
-            post = model.posterior(torch.tensor(list(rows), dtype=torch.double))
-            mean = post.mean.squeeze(-1).tolist()
-            sigma = post.variance.clamp_min(1e-12).sqrt().squeeze(-1).tolist()
-        return list(mean), list(sigma)
-
-    return posterior
+    return GP(model, x, y, yvar)
 
 
 # -- the evaluation ----------------------------------------------------------
@@ -192,6 +254,15 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], residual: Resi
 
 
 def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
+    """Recalibrate, evaluate leave-one-out, fit on everything, write the weights.
+
+    **The evaluated model and the published model are two different fits.** The metrics come
+    from n leave-one-out refits; the weights come from a final fit on all the labels, because
+    the version that gets served should have seen every measurement that was paid for.
+
+    **The weights land before the manifest**, so no reader can see a published version that
+    has none, and the residual is **copied** in beside them rather than referenced.
+    """
     started = time.process_time()
     output_dir = job["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
@@ -202,7 +273,21 @@ def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
         z = residual.project(example["x"])
         examples.append({**example, "z": z,
                          "residual": example["y"] - residual.predict(z)})
-    report = evaluate(examples, job, residual, fit or botorch_gp)
+    fitter = fit or botorch_gp
+    report = evaluate(examples, job, residual, fitter)
+
+    weights = "none"
+    if report["validated"]:
+        final = fitter(examples, job)
+        saver = getattr(final, "save", None)
+        if saver is not None:
+            version_dir = _version_dir(job)
+            os.makedirs(version_dir, exist_ok=True)
+            with open(job["residual_path"]) as src, \
+                    open(os.path.join(version_dir, RESIDUAL_NAME), "w") as dst:
+                dst.write(src.read())
+            weights = saver(version_dir)
+    report["weights"] = weights
     elapsed = time.process_time() - started
 
     version = _publish(job, report, elapsed)
@@ -220,8 +305,7 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
     from asteer.registry import ModelRegistry  # noqa: PLC0415
 
     registry = ModelRegistry(job["registry_root"])
-    existing = registry.versions(job["model_id"])
-    version = (max(existing) + 1) if existing else 0
+    version = _next_version(job)
     registry.publish(ModelManifest(
         model_id=job["model_id"],
         version=version,
@@ -243,10 +327,27 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
             # point rather than "public residual R, zero in-house labels".
             f"residual=v{report['residual_version']}",
             f"labels={report['n_labels']}",
+            # What a stream will find in this version's directory.
+            f"weights={report.get('weights', 'none')}",
             report["reason"],
         ])).strip(),
     ))
     return version
+
+
+def _registry(job: Dict[str, Any]):
+    from asteer.registry import ModelRegistry  # noqa: PLC0415
+
+    return ModelRegistry(job["registry_root"])
+
+
+def _next_version(job: Dict[str, Any]) -> int:
+    existing = _registry(job).versions(job["model_id"])
+    return (max(existing) + 1) if existing else 0
+
+
+def _version_dir(job: Dict[str, Any]) -> str:
+    return str(_registry(job).version_dir(job["model_id"], _next_version(job)))
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
