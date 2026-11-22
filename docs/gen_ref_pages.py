@@ -28,11 +28,35 @@ PACKAGES = [(ROOT, ROOT / "rome")]
 #: The ``interface_targeting`` modules are read statically like everything else,
 #: so they document without ``itgt``, torch or scikit-learn installed -- which is
 #: also why the heavy imports in that workflow are inside functions.
+#:
+#: The ``impress/small_molecule_binding`` set is listed whole, including the three
+#: train wrappers, which is a departure from ``interface_targeting`` just above --
+#: and deliberate. ``itgt_train_wrapper`` is a round and nothing else, so it is a
+#: script; these three are also what a *stream* loads, through ``load_state`` and
+#: ``preorg_predictor``, so their signatures are read by code someone else writes.
 EXTRA_MODULES = [
     (ROOT, ROOT / "examples" / "impress_r" / "protein_binding" / "mpnn_trainer.py"),
     (ROOT, ROOT / "examples" / "impress_r" / "interface_targeting" / "itgt_trainer.py"),
     (ROOT, ROOT / "examples" / "impress_r" / "interface_targeting" / "itgt_spec.py"),
     (ROOT, ROOT / "examples" / "impress_r" / "interface_targeting" / "itgt_propose.py"),
+]
+
+#: Every module of the ASD surrogates example, which is one use case rather than
+#: four loose modules: three models, each a driver plus a wrapper, over one corpus
+#: hook and one stream layer, with one entry point.
+_ASD = ROOT / "examples" / "impress" / "small_molecule_binding"
+EXTRA_MODULES += [
+    (ROOT, _ASD / name) for name in (
+        "corpus.py",
+        "streams.py",
+        "preorg.py",
+        "preorg_train_wrapper.py",
+        "affdelta.py",
+        "affdelta_train_wrapper.py",
+        "liganchor.py",
+        "liganchor_train_wrapper.py",
+        "run_asd_surrogates_rome.py",
+    )
 ]
 
 #: Private modules — documented nowhere, since they are not API.

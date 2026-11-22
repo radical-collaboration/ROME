@@ -12,6 +12,7 @@ much of a real campaign they involve. Start at the top.
 | [`impress_r/adaptive_rome.py`](impress-r.md#the-real-seam-with-executables-stubbed) | The real campaign seam with the executables stubbed, so it runs anywhere. | IMPRESS. |
 | [`impress_r/protein_binding_rome.py`](impress-r.md#the-real-campaign) | The real campaign: MPNN → AlphaFold → pLDDT, fine-tuning ProteinMPNN mid-run. | Delta, IMPRESS, ProteinMPNN, AlphaFold. |
 | [`impress_r/interface_targeting/`](interface-targeting.md) | Improving something other than a model: the surrogate learns the target RFD3's backbone diffusion is conditioned on. | Delta, IMPRESS, itgt. |
+| [`impress/small_molecule_binding/`](asd-surrogates.md) | Three surrogates trained from *measured physics* rather than from the campaign's own outputs, served back as resident streams. | Delta, impress-a, asteer, itgt, botorch. |
 
 ## Running them
 

@@ -141,6 +141,7 @@ nav:
       - LLM + GRPO: examples/llm-grpo.md
       - IMPRESS-R: examples/impress-r.md
       - Interface targeting: examples/interface-targeting.md
+      - ASD surrogates: examples/asd-surrogates.md
   - HPC:
       - Setting up on Delta: delta.md
       - Running IMPRESS: impress.md
