@@ -99,12 +99,19 @@ if _runtime_active() and _DDICT_CLASS is None:
         "single-process inside an allocation; refusing instead."
     )
 
-#: Dragon's ``Event`` when its class is importable, else ``threading.Event``. The two are
+#: Dragon's ``Event`` when a Dragon *runtime* is up, else ``threading.Event``. The two are
 #: interchangeable for ROME's usage -- ``set()``, ``clear()``, ``is_set()``, ``wait()``, at
 #: ``manager.py``'s ``stop_event``, ``stream.py``'s ``reload_event``/``stop_event`` and
 #: ``trainer.py``'s ``stop_event``. A Dragon Event additionally crosses process boundaries,
 #: which is the whole difference and the reason the in-process path is single-process.
-Event = _EVENT_CLASS if _EVENT_CLASS is not None else threading.Event
+#:
+#: **``_runtime_active()``, not ``is not None``.** Dragon's classes import fine outside a
+#: launch and then assert on launch parameters at *construction*, so binding on importability
+#: makes ``rome.Manager.__init__`` raise ``Launch parameter not initialized: GS_QD`` on any
+#: machine with dragon in site-packages and no runtime up -- before anything can run. It is
+#: the same import-time / construction-time / runtime confusion ``allocate_store`` below
+#: already separates, and this was the one line that still had it.
+Event = _EVENT_CLASS if (_EVENT_CLASS is not None and _runtime_active()) else threading.Event
 
 #: Kept bound so annotations like ``Optional[DDict]`` resolve either way. Without Dragon it
 #: is ``MutableMapping``, which is the type ``Namespace`` actually requires.

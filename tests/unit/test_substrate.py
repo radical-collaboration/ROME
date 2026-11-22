@@ -82,6 +82,30 @@ def test_the_dummy_loop_pieces_are_reachable_without_dragon():
     assert out.stdout.split() == ["DummyTrainer", "dummy_load", "dummy_infer"]
 
 
+def test_without_a_dragon_runtime_the_event_is_a_threading_event():
+    """The same question as the store's, asked of the other class this module binds.
+
+    `Event` was bound on whether Dragon's class *imported*, while `allocate_store` asked
+    whether a runtime was up. On a machine with dragon in site-packages and no runtime --
+    which is what the middleware's own pins now produce, since `rhapsody-py[dragon]` pins
+    `dragonhpc` -- constructing one raises `Launch parameter not initialized: GS_QD`, and
+    `rome.Manager.__init__` does construct one. So `import rome` worked and the first
+    `Manager` did not.
+
+    **This suite could not see it**, which is why the test is cold: `tests/conftest.py`
+    forces the stubs whenever `DRAGON_GS_CD` is unset, so every test here already had a
+    `threading.Event`. It was found by another repo's suite erroring five times.
+    """
+    out = _cold(
+        "from rome._substrate import Event, using_dragon;"
+        "import threading;"
+        "print(using_dragon(), Event is threading.Event);"
+        "e = Event(); e.set(); print(e.is_set())"
+    )
+    assert out.returncode == 0, out.stderr[-1200:]
+    assert out.stdout.split() == ["False", "True", "True"]
+
+
 def test_without_a_dragon_runtime_the_store_is_an_in_process_dict():
     """And it reports itself as such, rather than being inferred from the machine."""
     out = _cold(
