@@ -33,8 +33,18 @@ from rome.train.base import TrainTask
 
 __all__ = ["DEFAULT_PROPERTY", "AffDeltaConfig", "AffDeltaTrainer"]
 
-#: The in-house label C recalibrates against. ATM alchemical transfer, 10–20 a round.
-DEFAULT_PROPERTY = "dg_abfe"
+#: The in-house label C recalibrates against. ATM alchemical transfer, 10-20 a round.
+#:
+#: **The PROPERTY, not the metric** (item 66). `dg_abfe` is what ATM *reports*; `dg_corrected`
+#: is what the design tree holds and what `LabelRecord.property_name` carries, and this
+#: trainer filters a corpus on `property_name`. Against a real label store the old value
+#: selected **zero** records and refused every round, while every test here passed -- because
+#: every test wrote its own corpus using the same wrong name.
+#:
+#: The correspondence is `asteer.labels_workflow.PROPERTY_FOR_METRIC`, and it is asserted by a
+#: test rather than imported: CON-4 keeps this driver importing nothing from `asteer`, since
+#: it is constructed in the campaign process, and a test gets the same guarantee for nothing.
+DEFAULT_PROPERTY = "dg_corrected"
 FEATURE_KEY = "embedding"
 GROUP_KEY = "scaffold"
 

@@ -40,7 +40,12 @@ from rome.train.base import TrainTask
 __all__ = ["ANCHOR_OWN_METRICS", "DEFAULT_PROPERTY", "LigAnchorConfig", "LigAnchorTrainer"]
 
 #: The downstream outcome an anchor set is judged by. A label, not a property of the anchor.
-DEFAULT_PROPERTY = "dg_abfe"
+#:
+#: **The PROPERTY, not the metric** (item 66), for the reason given in `affdelta.py`: this
+#: trainer filters a corpus on `LabelRecord.property_name`, which carries `dg_corrected`, and
+#: `dg_abfe` is the name ATM reports its own measurement under. The two differ on purpose and
+#: the mismatch is accepted silently, which is why it survived every test.
+DEFAULT_PROPERTY = "dg_corrected"
 ACTION_KEY = "action"
 GROUP_KEY = "scaffold"
 

@@ -113,9 +113,10 @@ import rome
 
 #: Item 36's naming contract, read rather than restated. A `LabelRecord` carries the
 #: *property* a measurement supersedes (`dg_corrected`), not the metric the tool reported
-#: (`dg_abfe`) -- and two of the three trainers default `property_name` to the metric, which
-#: selects nothing from this store. Reading the mapping here means the runner cannot be the
-#: fourth place the correspondence is written. See backlog item 66.
+#: (`dg_abfe`). Reading the mapping here means the runner cannot be a fourth place the
+#: correspondence is written -- and it stays right even though J6 has since fixed the two
+#: drivers that defaulted to the metric, because passing the property explicitly is what a
+#: runner should do whatever the defaults are. See backlog item 66.
 from asteer.labels_workflow import PROPERTY_FOR_METRIC  # noqa: E402
 
 ABFE_PROPERTY = PROPERTY_FOR_METRIC["dg_abfe"][0]

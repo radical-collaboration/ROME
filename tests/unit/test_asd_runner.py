@@ -198,13 +198,44 @@ def test_no_line_in_the_runner_names_a_device_or_a_host():
 # -- the two streams that refuse --------------------------------------------
 
 
+def test_the_default_property_of_every_trainer_is_a_property_and_not_a_metric():
+    """Item 66, fixed at the source by J6 rather than worked around by the runner.
+
+    `affdelta.py` and `liganchor.py` both defaulted to `dg_abfe`, which is what ATM
+    *reports*. A trainer filters a corpus on `LabelRecord.property_name`, which carries
+    `dg_corrected`. Against a real label store the defaults selected **zero** records and
+    refused every round, while every test passed -- because every test wrote its own corpus
+    under the same wrong name. The runner was already passing the property explicitly, which
+    is right for a runner and left the defaults wrong for everybody else.
+
+    **A test and not an import.** These drivers are constructed in the campaign process and
+    import nothing from `asteer` (CON-4); asserting the literal against the contract here
+    gives the same guarantee for nothing. If `PROPERTY_FOR_METRIC` ever changes, this fails
+    rather than the drivers silently disagreeing with it.
+    """
+    from asteer.labels_workflow import PROPERTY_FOR_METRIC
+
+    from examples.impress.small_molecule_binding import affdelta, liganchor, preorg
+
+    assert affdelta.DEFAULT_PROPERTY == PROPERTY_FOR_METRIC["dg_abfe"][0] == "dg_corrected"
+    assert liganchor.DEFAULT_PROPERTY == PROPERTY_FOR_METRIC["dg_abfe"][0]
+    assert preorg.DEFAULT_PROPERTY == PROPERTY_FOR_METRIC["preorg_rmsd"][0] == "preorg_rmsd"
+
+    metrics = set(PROPERTY_FOR_METRIC)
+    for name, driver in (("affdelta", affdelta), ("liganchor", liganchor),
+                         ("preorg", preorg)):
+        assert driver.DEFAULT_PROPERTY not in (metrics - {"preorg_rmsd"}), (
+            f"{name} defaults to a metric name; the label store writes property names"
+        )
+
+
 def test_the_property_each_trainer_filters_on_is_the_one_the_label_store_writes(tmp_path):
-    """Found by wiring this runner: two trainers default to the *metric* name.
+    """The runner's half of item 66: it passes the property explicitly either way.
 
     `PROPERTY_FOR_METRIC` maps `dg_abfe` (what ATM reports) to `dg_corrected` (what the
-    design tree holds and what a `LabelRecord` carries). C's and A's `property_name` default
-    to the metric, so against this store they would select nothing and refuse every round.
-    Backlog item 66; the runner reads the mapping rather than restating it.
+    design tree holds and what a `LabelRecord` carries). The runner reads the mapping rather
+    than restating it, so it cannot be a fourth place the correspondence is written -- and
+    since J6 the drivers' own defaults agree with it too.
     """
     surrogates = {s.model_id: s for s in runner.build_surrogates(_Flow(), _settings(tmp_path))}
     assert runner.ABFE_PROPERTY == "dg_corrected"
@@ -281,7 +312,7 @@ def test_importing_the_runner_pulls_in_no_torch():
 
 def _label(label_id: str, prop: str, value: float, kind=None):
     from asteer.contracts import LabelKind, LabelRecord
-    from asteer.features import embedding_metadata
+    from asteer.features import embedding_metadata, featuriser_for_property
 
     return LabelRecord(
         label_id=label_id,
@@ -297,9 +328,13 @@ def _label(label_id: str, prop: str, value: float, kind=None):
         protocol="md-500ns",
         source_job_id="job-1",
         # Through the featuriser, not written by hand: the corpus row and a score request
-        # agree because they share `asteer.features.embed` (D3).
-        metadata=embedding_metadata({"structure": f"/designs/{label_id}.pdb",
-                                     "pocket_selection": "A:112-140"}),
+        # agree because they share `asteer.features.embed` (D3) -- and since asteer's J4,
+        # because they resolve the *same* featuriser for this property rather than sharing a
+        # module-level default. `embed` has no default any more, on purpose.
+        metadata=embedding_metadata(
+            {"structure": f"/designs/{label_id}.pdb", "pocket_selection": "A:112-140"},
+            featuriser=featuriser_for_property(prop),
+        ),
     )
 
 
