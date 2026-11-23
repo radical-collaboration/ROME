@@ -45,16 +45,32 @@ class _StubConfig:
         self.__dict__.update(kwargs)
 
 
+#: The descriptors Dragon sets only inside a launch, in both spellings it has used:
+#: ``*_CD`` through 0.14, ``*_QD`` from 0.15, which renamed every one of them. This is the
+#: same rule as `rome._substrate._runtime_active`, spelled out a second time on purpose:
+#: that one asks `dragon.infrastructure.facts` for the names, and this file must decide
+#: whether to stub `dragon` out *before* anything imports it.
+_LAUNCH_DESCRIPTORS = (
+    "DRAGON_GS_CD", "DRAGON_GS_RET_CD", "DRAGON_LOCAL_SHEP_CD", "DRAGON_LOCAL_BE_CD",
+    "DRAGON_GS_QD", "DRAGON_GS_RET_QD", "DRAGON_LOCAL_LS_QD", "DRAGON_LOCAL_BE_QD",
+)
+
+
 def _dragon_runtime_active() -> bool:
     """Whether we are running under ``dragon``.
 
     Dragon's Python API is importable without the runtime, but every object it
     creates asserts on launch parameters that only exist inside a Dragon
     launch. So "is dragon installed" is the wrong question — installing it and
-    then running plain ``pytest`` would fail on ``Launch parameter not
-    initialized: GS_CD``. This asks whether the runtime is actually up.
+    then running plain ``pytest`` would fail on a missing launch parameter.
+    This asks whether the runtime is actually up.
+
+    **Not by naming one descriptor.** This checked ``DRAGON_GS_CD`` until 2026-11-22, and
+    Dragon 0.15 renamed it to ``DRAGON_GS_QD``; under a 0.15 launch the old check said no
+    runtime was up, which in `rome._substrate` meant a `threading.Event` that cannot be
+    pickled to a Dragon task (Delta job ``24400895``).
     """
-    return bool(os.environ.get("DRAGON_GS_CD"))
+    return any(os.environ.get(name) for name in _LAUNCH_DESCRIPTORS)
 
 
 def _force_module(name: str) -> types.ModuleType:

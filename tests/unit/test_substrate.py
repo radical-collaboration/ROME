@@ -33,7 +33,8 @@ REPO = Path(__file__).resolve().parents[2]
 
 def _cold(code: str, **env: str) -> subprocess.CompletedProcess:
     """Run `code` in a fresh interpreter with no conftest and no inherited Dragon state."""
-    clean = {k: v for k, v in os.environ.items() if k != "DRAGON_GS_CD"}
+    clean = {k: v for k, v in os.environ.items()
+             if not (k.startswith("DRAGON_") and k.endswith(("_CD", "_QD")))}
     clean["PYTHONPATH"] = str(REPO)
     clean.update(env)
     return subprocess.run(
@@ -157,3 +158,72 @@ def test_under_a_dragon_launch_without_dragon_installed_it_refuses():
     assert out.returncode != 0, "a Dragon launch with no Dragon package was accepted"
     assert "under a Dragon launch" in out.stderr
     assert "refusing" in out.stderr
+
+
+@pytest.mark.parametrize("descriptor", [
+    # 0.14 and earlier: channel descriptors.
+    "DRAGON_GS_CD", "DRAGON_GS_RET_CD", "DRAGON_LOCAL_SHEP_CD", "DRAGON_LOCAL_BE_CD",
+    # 0.15: the same parameters, every one renamed to a queue descriptor.
+    "DRAGON_GS_QD", "DRAGON_GS_RET_QD", "DRAGON_LOCAL_LS_QD", "DRAGON_LOCAL_BE_QD",
+])
+def test_a_launch_is_recognised_under_either_spelling(descriptor):
+    """The regression that cost a Delta allocation its stream arms (job `24400895`).
+
+    `_runtime_active` named one descriptor, `DRAGON_GS_CD`, and Dragon 0.15 renamed every
+    channel descriptor to a queue descriptor. Inside a 0.15 launch the check therefore said
+    no runtime was up, `Event` bound to `threading.Event`, and every `StreamTask` -- which
+    holds two of them -- failed to pickle to the Dragon backend with *"cannot pickle
+    '_thread.lock' object"*. No stream started, and nothing said why.
+
+    Parametrised over both spellings rather than asserting the current one, because the
+    point is that a rename must not be able to do this again.
+    """
+    out = _cold(
+        "import rome._substrate as s; print('ACTIVE', s._runtime_active())",
+        **{descriptor: "/fake/descriptor"},
+    )
+    # Two legitimate outcomes, because this suite runs both with Dragon installed and
+    # without. With it: the import succeeds and `_runtime_active` says True. Without it:
+    # the module refuses at import, which is itself the launch having been recognised.
+    recognised = (
+        out.stdout.strip().endswith("ACTIVE True")
+        or (out.returncode != 0 and "under a Dragon launch" in out.stderr)
+    )
+    assert recognised, (
+        f"{descriptor} set was not read as a Dragon launch. On a machine with Dragon "
+        "installed this is the path that binds threading.Event and breaks every stream.\n"
+        f"rc={out.returncode}\nstdout={out.stdout[-400:]}\nstderr={out.stderr[-600:]}"
+    )
+
+
+def test_no_descriptor_means_no_runtime():
+    """The other half: nothing set is not a launch, whatever Dragon is installed."""
+    out = _cold("import rome._substrate as s; print('ACTIVE', s._runtime_active())")
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.strip().endswith("ACTIVE False")
+
+
+def test_the_descriptor_names_come_from_dragon_when_it_is_there():
+    """The names are asked of `dragon.infrastructure.facts`, not hard-coded.
+
+    A fake `facts` module is enough to show the derivation: if the names came from the
+    hard-coded fallback, the invented descriptor below would not be among them.
+    """
+    out = _cold(
+        "import sys, types;"
+        "facts = types.ModuleType('dragon.infrastructure.facts');"
+        "facts.PREFIX = 'DRAGON_';"
+        "facts.env_vars = frozenset({'INVENTED_QD', 'MODE'});"
+        "infra = types.ModuleType('dragon.infrastructure');"
+        "infra.facts = facts;"
+        "pkg = types.ModuleType('dragon');"
+        "pkg.infrastructure = infra;"
+        "sys.modules.update({'dragon': pkg, 'dragon.infrastructure': infra,"
+        " 'dragon.infrastructure.facts': facts});"
+        "import rome._substrate as s;"
+        "names = s._launch_descriptor_names();"
+        "print('DRAGON_INVENTED_QD' in names, 'DRAGON_MODE' in names)"
+    )
+    assert out.returncode == 0, out.stderr[-1200:]
+    # The invented descriptor is found; `MODE`, which is not a descriptor, is not.
+    assert out.stdout.strip() == "True False"

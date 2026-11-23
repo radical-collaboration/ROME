@@ -38,8 +38,10 @@ not be mistaken for:
   Dragon will not appear here** -- which is exactly why the Dragon integration tests under
   ``tests/dragon/`` are not replaced by anything in this module.
 
-Selection is by **whether a Dragon runtime is up** -- ``DRAGON_GS_CD`` in the environment --
-not by whether the package imports and not by a flag. A flag would let a machine that has
+Selection is by **whether a Dragon runtime is up** -- one of Dragon's own launch
+descriptors in the environment, asked of ``dragon.infrastructure.facts`` rather than named
+here, because 0.15 renamed every one of them -- not by whether the package imports and not
+by a flag. A flag would let a machine that has
 Dragon silently run the in-process path, and the resulting test pass would be about the wrong
 substrate. Availability alone would be worse: Dragon's API imports fine outside a ``dragon``
 launch and then every object it creates asserts on launch parameters, so "importable" means a
@@ -63,22 +65,66 @@ __all__ = [
     "using_dragon",
 ]
 
+#: Fallback launch-parameter names, used only when Dragon's own list cannot be read: the
+#: descriptors Dragon sets inside a launch, in both spellings it has used. ``*_CD`` (channel
+#: descriptors) is 0.14 and earlier; ``*_QD`` (queue descriptors) is 0.15, which renamed
+#: every one of them. A machine with no Dragon has no runtime either, so the answer there is
+#: False whichever list is consulted.
+_LAUNCH_DESCRIPTORS = (
+    "DRAGON_GS_CD", "DRAGON_GS_RET_CD", "DRAGON_LOCAL_SHEP_CD", "DRAGON_LOCAL_BE_CD",
+    "DRAGON_GS_QD", "DRAGON_GS_RET_QD", "DRAGON_LOCAL_LS_QD", "DRAGON_LOCAL_BE_QD",
+)
+
+
+def _launch_descriptor_names() -> tuple:
+    """The descriptor parameters *this* Dragon uses, asked of Dragon rather than hard-coded.
+
+    ``dragon.infrastructure.facts.env_vars`` is the vendor's own list of launch parameters
+    and ``facts.PREFIX`` the prefix it reads them under, so deriving the names from those
+    survives a rename. The result is the **union** of that and :data:`_LAUNCH_DESCRIPTORS`,
+    the spellings Dragon has used so far: 0.15 declares only the ``*_QD`` names, so a
+    derived-only list would stop recognising a 0.14 launch, and a hard-coded-only list is
+    what broke in the first place.
+    """
+    try:
+        from dragon.infrastructure import facts  # noqa: PLC0415
+
+        declared = tuple(
+            f"{facts.PREFIX}{name}"
+            for name in facts.env_vars
+            if name.endswith(("_CD", "_QD"))
+        )
+    except Exception:  # noqa: BLE001 -- no Dragon, or a facts module shaped differently
+        declared = ()
+    # The union, not whichever list is available: what Dragon declares covers a future
+    # rename, and the known spellings cover a Dragon whose facts module cannot be read or
+    # has dropped a name that is still set in the environment. Either one alone is a way to
+    # be inside a launch and not notice.
+    return tuple(dict.fromkeys(declared + _LAUNCH_DESCRIPTORS))
+
+
 def _runtime_active() -> bool:
     """Is a Dragon *runtime* up, as opposed to a Dragon package being importable?
 
-    **"Is Dragon installed" is the wrong question**, and ROME's own test harness says so:
-    ``tests/conftest.py:48`` forces its stubs whenever ``DRAGON_GS_CD`` is unset, with the
-    reason stated at ``:122`` -- *"Force the stubs even when dragon is importable: outside a
-    Dragon launch its objects cannot be constructed at all."* Every Dragon object asserts on
-    launch parameters that exist only inside a ``dragon`` launch, so an importable-but-not-
-    launched Dragon fails at construction with ``Launch parameter not initialized: GS_CD``,
-    several frames from anything a reader would connect to the cause.
+    **"Is Dragon installed" is the wrong question.** Every Dragon object asserts on launch
+    parameters that exist only inside a ``dragon`` launch, so an importable-but-not-launched
+    Dragon fails at construction several frames from anything a reader would connect to the
+    cause. The question is whether those parameters are in the environment.
 
-    So the test here is the same test the harness already uses, deliberately rather than
-    coincidentally: one rule, in one place, instead of a second rule that disagrees with it
-    on the machines where it matters.
+    **It must not be asked by naming one of them, which is what this did until 2026-11-22.**
+    The check was ``DRAGON_GS_CD``, and Dragon 0.15 renamed every channel descriptor to a
+    queue descriptor: ``GS_CD`` became ``GS_QD`` and is not in ``facts.env_vars`` at all. So
+    inside a 0.15 launch this returned False, ROME bound ``threading.Event`` for
+    ``stop_event`` and ``reload_event``, and every ``StreamTask`` then carried two
+    ``_thread.lock``\\ s and could not be pickled -- *"cannot pickle '_thread.lock' object"*,
+    raised in the Dragon backend's dispatcher as it built the task, so **no stream ever
+    started**. Measured on Delta, job ``24400895``, Dragon 0.15.0, where three replicas
+    failed this way and the arm that pinned them by hand failed identically.
+
+    So the names come from :func:`_launch_descriptor_names`, which asks Dragon. A renamed
+    parameter is then a parameter this still finds.
     """
-    return bool(os.environ.get("DRAGON_GS_CD"))
+    return any(os.environ.get(name) for name in _launch_descriptor_names())
 
 
 _DDICT_CLASS = None
@@ -94,7 +140,8 @@ if _runtime_active() and _DDICT_CLASS is None:
     # Under a Dragon launch with no Dragon package is a broken environment, not a laptop.
     # Say so rather than silently running single-process inside an allocation.
     raise RuntimeError(
-        "DRAGON_GS_CD is set, so this process is under a Dragon launch, but dragon is "
+        "A Dragon launch descriptor is set, so this process is under a Dragon launch, "
+        "but dragon is "
         "not importable. The in-process substrate would run silently and "
         "single-process inside an allocation; refusing instead."
     )
@@ -174,7 +221,8 @@ def require_dragon(what: str) -> None:
     """
     if not _runtime_active():
         raise RuntimeError(
-            f"{what} requires a Dragon runtime, and none is up here (DRAGON_GS_CD unset). "
+            f"{what} requires a Dragon runtime, and none is up here (no Dragon launch "
+            "descriptor in the environment). "
             "ROME imports and runs single-process without one (see rome._substrate); "
             "cross-process placement and a shared DDict do not."
         )
