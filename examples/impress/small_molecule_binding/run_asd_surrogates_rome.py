@@ -147,9 +147,10 @@ class Settings:
     buffer_path: str = ""
     min_samples: Dict[str, int] = field(default_factory=dict)
     trainer_gpus: Dict[str, int] = field(default_factory=dict)
-    #: A stream task's GPUs. Zero by default because the published featuriser is a declared
-    #: stand-in of width 2 (`asteer.features.STANDIN_DIM`) and a five-member MLP over two
-    #: inputs does not want a device. A real encoder changes this number, not this comment.
+    #: A stream task's GPUs. Zero by default because the featuriser Model B is pointed at is
+    #: still a declared stand-in of width 2
+    #: (`asteer.features.FEATURISERS["standin-1"].width`) and a five-member MLP over two
+    #: inputs does not want a device. A real featuriser changes this number, not this comment.
     stream_gpus: int = 0
     poll_interval: float = 5.0
     max_rounds: Optional[int] = None

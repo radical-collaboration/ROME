@@ -288,21 +288,29 @@ def preorg_predictor(version_dir: str, manifest: Any = None):
     a score request agree because they share a function rather than because two copies were
     kept in step.
 
+    **Which featuriser is named, and it is Model B's own** (asteer J4). `embed` no longer has
+    a default: a single module-level featuriser is what let a corpus row and a request disagree
+    while both looked fine, and `FEATURISER_FOR_MODEL` is now the one place that correspondence
+    is written. This asks for it by model id rather than by name, so the day Model B's
+    featuriser changes, this call follows without being edited.
+
     A payload `embed` refuses raises out of the stream, which `streams.serve_requests` turns
     into a failed response for that request alone. That is the right blast radius: one client
     sent something unfeaturisable, and the other two surrogates keep serving.
     """
-    from asteer.features import embed  # noqa: PLC0415
+    from asteer.features import embed, featuriser_for_model  # noqa: PLC0415
     from preorg import DEFAULT_PROPERTY  # noqa: PLC0415
+    from streams import MODEL_B  # noqa: PLC0415
 
     ensemble = load_state(version_dir, manifest)
     # The property this version regresses on. One per round by design -- the three B predicts
     # are three regressions sharing a corpus, not one multi-output head -- so the served key
     # comes from the driver's constant rather than being invented here.
     prop = DEFAULT_PROPERTY
+    featuriser = featuriser_for_model(MODEL_B)
 
     def predict(features):
-        (mean,), (sigma,) = ensemble([embed(features)])
+        (mean,), (sigma,) = ensemble([embed(features, featuriser=featuriser)])
         return {prop: mean}, {prop: sigma}
 
     return predict
