@@ -140,6 +140,11 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], fit: Fitter,
     report: Dict[str, Any] = {
         "nll": None, "calibration": None, "logo_r2": None,
         "holdout_n": 0, "n_groups": len({e.get("group") for e in examples if e.get("group")}),
+        # Groups the grouped fold ACTUALLY held out, which is not the corpus count: a group
+        # whose removal leaves fewer than two training rows is skipped below, and J2 measured
+        # a clustering of this data that is 2,487 singletons out of 2,508 groups. The gate
+        # reads this one (asteer J5, rule 3).
+        "n_holdout_groups": 0,
         "validated": False, "reason": "",
     }
     train, holdout = scaffold_split(examples, float(job["holdout_fraction"]))
@@ -170,6 +175,7 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], fit: Fitter,
     if len(groups) >= 3:
         pooled_truth: List[float] = []
         pooled_pred: List[float] = []
+        held_out = 0
         for held in groups:
             inner_train = [e for e in examples if str(e["group"]) != held]
             inner_test = [e for e in examples if str(e["group"]) == held]
@@ -178,6 +184,8 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], fit: Fitter,
             inner_mean, _ = fit(inner_train, job)([e["x"] for e in inner_test])
             pooled_pred.extend(inner_mean)
             pooled_truth.extend(e["y"] for e in inner_test)
+            held_out += 1
+        report["n_holdout_groups"] = held_out
         if len(pooled_truth) >= 3:
             report["logo_r2"] = _r2(pooled_truth, pooled_pred)
     report["validated"] = report["logo_r2"] is not None
@@ -226,6 +234,15 @@ class Ensemble:
         self.hidden = [int(h) for h in job["hidden"]]
         self.n_members = int(job["n_members"])
         self.n_features = int(n_features)
+        # **What this ensemble actually regressed on, and what produced its inputs.**
+        # Both travel with the weights rather than being read off a module constant at serve
+        # time (J8). The property because `preorg_predictor` used to take it from
+        # `preorg.DEFAULT_PROPERTY`, so an ensemble fitted on `rotamer_entropy` would have
+        # served its numbers under the key `preorg_rmsd`; the featuriser because a predictor
+        # that embeds with one and was fitted with another is wrong in a way that produces
+        # finite, plausible numbers.
+        self.property_name = str(job.get("property_name") or "")
+        self.featuriser = str(job.get("featuriser") or "")
 
     def __call__(self, rows: Sequence[Sequence[float]]) -> Tuple[List[float], List[float]]:
         import torch  # noqa: PLC0415
@@ -249,6 +266,8 @@ class Ensemble:
         path = os.path.join(version_dir, STATE_NAME)
         torch.save({"hidden": self.hidden, "n_members": self.n_members,
                     "n_features": self.n_features,
+                    "property_name": self.property_name,
+                    "featuriser": self.featuriser,
                     "members": [m.state_dict() for m in self.members]}, path)
         return STATE_NAME
 
@@ -269,7 +288,12 @@ def load_state(version_dir: str, manifest: Any = None) -> Ensemble:
             "and no weights, so there is nothing to serve"
         )
     state = torch.load(path, map_location="cpu", weights_only=False)
-    job = {"n_members": state["n_members"], "hidden": state["hidden"]}
+    job = {"n_members": state["n_members"], "hidden": state["hidden"],
+           # Written by `save` since J8. A state file from before then carries neither, and
+           # `preorg_predictor` refuses it by name rather than guessing -- an ensemble that
+           # cannot say what it fitted is one whose numbers cannot be served under any key.
+           "property_name": state.get("property_name", ""),
+           "featuriser": state.get("featuriser", "")}
     members = _nets(int(state["n_features"]), job)
     for net, weights in zip(members, state["members"]):
         net.load_state_dict(weights)
@@ -294,20 +318,58 @@ def preorg_predictor(version_dir: str, manifest: Any = None):
     is written. This asks for it by model id rather than by name, so the day Model B's
     featuriser changes, this call follows without being edited.
 
+    **And both are checked against the weights rather than assumed** (J8). Two separate
+    defects, both of which produce finite, plausible numbers:
+
+    - the served key used to be `preorg.DEFAULT_PROPERTY`, a module constant, so an ensemble
+      fitted on `rotamer_entropy` would have served its numbers under `preorg_rmsd` -- which
+      goes live the moment J12 makes one round fit more than one property;
+    - a predictor that embeds with `pocket-geom-1` while the weights were fitted on
+      `standin-1` feeds the model nine real columns it has never seen. Nothing in the
+      arithmetic complains; the numbers are simply wrong.
+
     A payload `embed` refuses raises out of the stream, which `streams.serve_requests` turns
     into a failed response for that request alone. That is the right blast radius: one client
     sent something unfeaturisable, and the other two surrogates keep serving.
     """
     from asteer.features import embed, featuriser_for_model  # noqa: PLC0415
-    from preorg import DEFAULT_PROPERTY  # noqa: PLC0415
-    from streams import MODEL_B  # noqa: PLC0415
 
     ensemble = load_state(version_dir, manifest)
-    # The property this version regresses on. One per round by design -- the three B predicts
-    # are three regressions sharing a corpus, not one multi-output head -- so the served key
-    # comes from the driver's constant rather than being invented here.
-    prop = DEFAULT_PROPERTY
-    featuriser = featuriser_for_model(MODEL_B)
+
+    # The model id from the manifest when there is one, and otherwise from the registry's own
+    # layout, `<root>/<model_id>/v<n>`. **Not `from streams import MODEL_B`**: that resolves
+    # only when the example directory is on `sys.path`, which is true when the wrapper runs
+    # as a script and false everywhere else -- and nothing exercised this function until J8's
+    # tests, so it had never been found.
+    model_id = getattr(manifest, "model_id", "") or os.path.basename(
+        os.path.dirname(os.path.abspath(version_dir))
+    )
+    featuriser = featuriser_for_model(model_id)
+
+    # The property this version regresses on, READ FROM THE WEIGHTS. One per round by design
+    # -- the three B predicts are three regressions sharing a corpus, not one multi-output
+    # head -- so which one it was is a fact about the fit, not about the driver's import.
+    prop = ensemble.property_name
+    if not prop:
+        raise ValueError(
+            f"{version_dir} holds an ensemble that does not name the property it fitted. It "
+            "was written before J8, and serving it would mean choosing a key for it here, "
+            "which is the defect J8 removed. Refit the round."
+        )
+    if not ensemble.featuriser:
+        raise ValueError(
+            f"{version_dir} holds an ensemble that does not name the featuriser its inputs "
+            "came from, so there is no way to tell whether it matches the one this stream "
+            "embeds with. Written before J8; refit the round."
+        )
+    if ensemble.featuriser != featuriser.name:
+        raise ValueError(
+            f"{version_dir} was fitted with featuriser {ensemble.featuriser!r} and "
+            f"{model_id} now embeds with {featuriser.name!r} ({featuriser.width} columns). "
+            "Serving it would feed the model inputs it has never seen, and the arithmetic "
+            "would not complain. Refit the round against the current featuriser, or promote "
+            "a version that was."
+        )
 
     def predict(features):
         (mean,), (sigma,) = ensemble([embed(features, featuriser=featuriser)])
@@ -333,6 +395,9 @@ def torch_ensemble(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Ensemble
     """
     import torch  # noqa: PLC0415
 
+    # The fitted ensemble carries its own provenance, so a predictor never has to assume it.
+    job = {**job, "featuriser": _featuriser_for(job)}
+
     x = torch.tensor([e["x"] for e in train], dtype=torch.float32)
     y = torch.tensor([e["y"] for e in train], dtype=torch.float32).unsqueeze(-1)
     members = _nets(int(x.shape[1]), job)
@@ -354,6 +419,19 @@ def torch_ensemble(train: List[Dict[str, Any]], job: Dict[str, Any]) -> Ensemble
 
 
 # -- the round ---------------------------------------------------------------
+
+
+def _featuriser_for(job: Dict[str, Any]) -> str:
+    """The featuriser this model embeds with, by model id.
+
+    Resolved inside the task rather than carried from the driver: the driver is constructed
+    in the campaign process and imports nothing from asteer (CON-4), and a driver that could
+    name a featuriser could name one the model does not use. One helper so the fit and the
+    manifest cannot disagree about it -- which is the class of defect J4 exists for.
+    """
+    from asteer.features import FEATURISER_FOR_MODEL  # noqa: PLC0415
+
+    return FEATURISER_FOR_MODEL.get(str(job.get("model_id") or ""), "")
 
 
 def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
@@ -435,6 +513,12 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
         calibration=report["calibration"],
         logo_r2=report["logo_r2"],
         holdout_n=report["holdout_n"],
+        # The HOLDOUT group count, not the corpus one. J2 measured why: an honest clustering
+        # of this data is 2,487 singletons out of 2,508 groups, so a corpus-wide count clears
+        # the gate's bar of four for free while the grouped fold may average over one.
+        n_holdout_groups=report["n_holdout_groups"],
+        featuriser=_featuriser_for(job),
+        trained_on=str(job["property_name"]),
         min_holdout_n=int(job["min_holdout_n"]),
         min_effect_size=float(job["min_effect_size"]),
         # CPU wall clock, as what it is. Never converted into a GPU-hour (backlog item 48).
@@ -443,7 +527,11 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
         notes=" ".join(filter(None, [
             str(job.get("notes") or ""),
             f"property={job['property_name']}",
+            # Both counts, because they answer different questions and J2 showed how far
+            # apart they can be: how many clusters the corpus has, and how many the grouped
+            # fold actually held out.
             f"groups={report['n_groups']}",
+            f"holdout_groups={report['n_holdout_groups']}",
             # What a stream will find in this version's directory. "none" is the honest
             # answer for a round that produced no model, and is what item 52 was about.
             f"weights={report.get('weights', 'none')}",

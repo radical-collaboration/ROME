@@ -51,12 +51,12 @@ def _row(n: int, *, group: str, x0: float, featured: bool = True,
     }
 
 
-def _corpus(n_groups: int = 5, per_group: int = 4) -> list:
+def _corpus(n_groups: int = 5, per_group: int = 4, prop: str = "preorg_rmsd") -> list:
     rows, n = [], 0
     for g in range(n_groups):
         for k in range(per_group):
             n += 1
-            rows.append(_row(n, group=f"sc{g}", x0=float(g) + 0.25 * k))
+            rows.append(_row(n, group=f"sc{g}", x0=float(g) + 0.25 * k, prop=prop))
     return rows
 
 
@@ -409,3 +409,131 @@ def test_the_real_ensemble_is_written_and_loads_back(tmp_path):
     mean, sigma = loaded([[1.0, 1.0]])
     assert abs(mean[0] - 2.0) < 1.0, "the corpus is y = 2*x0"
     assert sigma[0] > 0.0, "an ensemble that reports zero spread is reporting nothing"
+
+
+# -- J8: a predictor reads its provenance instead of assuming it -----------------------
+
+
+def _fitted_version(tmp_path, *, property_name: str = "preorg_rmsd", **over):
+    """One real round, written to v0, with the ensemble on disk.
+
+    The corpus is written under the property the round fits, because a round filters on it
+    -- which is the whole of item 66 and the reason a mismatched fixture produces a version
+    with a manifest and no weights rather than a visible failure.
+    """
+    pytest.importorskip("torch.nn", reason="the wrapper's own dependency")
+    job = _job(tmp_path, _corpus(prop=property_name), epochs=40,
+               property_name=property_name, **over)
+    run_round(job)
+    return job, os.path.join(job["registry_root"], "pocket_preorg", "v0")
+
+
+def test_the_ensemble_records_the_property_and_the_featuriser_it_was_fitted_with(tmp_path):
+    from examples.impress.small_molecule_binding.preorg_train_wrapper import load_state
+
+    from asteer.features import FEATURISER_FOR_MODEL
+
+    job, version_dir = _fitted_version(tmp_path)
+    loaded = load_state(version_dir)
+    assert loaded.property_name == job["property_name"]
+    assert loaded.featuriser == FEATURISER_FOR_MODEL["pocket_preorg"]
+
+
+def test_the_served_key_comes_from_the_weights_and_not_from_the_module_constant(tmp_path):
+    """**The defect J8 removed**, and it goes live the moment J12 lands.
+
+    `preorg_predictor` read `preorg.DEFAULT_PROPERTY`, a module constant, so an ensemble
+    fitted on `rotamer_entropy` would have served its numbers under the key `preorg_rmsd` --
+    and a client reading a rotamer entropy as a pocket RMSD gets a finite, plausible,
+    completely wrong number. One property per round is by design; which one it was is a fact
+    about the fit.
+    """
+    from examples.impress.small_molecule_binding import preorg
+    from examples.impress.small_molecule_binding.preorg_train_wrapper import preorg_predictor
+
+    _job_, version_dir = _fitted_version(tmp_path, property_name="rotamer_entropy")
+    predict = preorg_predictor(version_dir)
+    values, sigmas = predict({"structure": "/designs/n1/complex.pdb",
+                              "pocket_selection": "A:112-140"})
+
+    assert list(values) == ["rotamer_entropy"]
+    assert list(sigmas) == ["rotamer_entropy"]
+    assert preorg.DEFAULT_PROPERTY == "preorg_rmsd", (
+        "the module constant is unchanged, which is what makes this test meaningful: the "
+        "served key differs from it"
+    )
+
+
+def test_a_version_fitted_with_another_featuriser_is_refused_by_name(tmp_path):
+    """A predictor that embeds with one featuriser and was fitted with another serves a
+    model inputs it has never seen, and nothing in the arithmetic complains."""
+    import torch
+
+    from examples.impress.small_molecule_binding.preorg_train_wrapper import (
+        STATE_NAME, preorg_predictor,
+    )
+
+    _job_, version_dir = _fitted_version(tmp_path)
+    path = os.path.join(version_dir, STATE_NAME)
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    state["featuriser"] = "encoder-activations-9"
+    torch.save(state, path)
+
+    with pytest.raises(ValueError) as caught:
+        preorg_predictor(version_dir)
+    assert "encoder-activations-9" in str(caught.value)
+    assert "never seen" in str(caught.value)
+
+
+@pytest.mark.parametrize("missing", ["property_name", "featuriser"])
+def test_a_version_written_before_j8_is_refused_rather_than_guessed_at(tmp_path, missing):
+    import torch
+
+    from examples.impress.small_molecule_binding.preorg_train_wrapper import (
+        STATE_NAME, preorg_predictor,
+    )
+
+    _job_, version_dir = _fitted_version(tmp_path)
+    path = os.path.join(version_dir, STATE_NAME)
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    state[missing] = ""
+    torch.save(state, path)
+
+    with pytest.raises(ValueError, match="before J8"):
+        preorg_predictor(version_dir)
+
+
+def test_the_manifest_carries_what_the_promotion_gate_reads(tmp_path):
+    """All three were prose or absent: a module constant, an unrecorded target, and a
+    corpus-wide group count in a sentence."""
+    job = _job(tmp_path, _corpus())
+    run_round(job, fit=_linear_fit)
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("pocket_preorg", 0)
+
+    assert manifest.trained_on == job["property_name"]
+    assert manifest.featuriser
+    assert manifest.n_holdout_groups is not None
+
+    from asteer.promotion import decide
+
+    for rule in ("featuriser_unnamed", "target_unnamed", "holdout_groups_unknown"):
+        assert decide(manifest).rule != rule
+
+
+def test_the_holdout_group_count_is_not_the_corpus_group_count(tmp_path):
+    """asteer J5 rule 3 reads the holdout count, and J2 measured why.
+
+    A group whose removal leaves fewer than two training rows is skipped by the fold, so the
+    number of groups the grouped score actually averages over can be smaller than the number
+    of clusters in the corpus. Reporting the corpus count as if it were the holdout count is
+    how a bar of four gets cleared for free.
+    """
+    job = _job(tmp_path, _corpus())
+    run_round(job, fit=_linear_fit)
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("pocket_preorg", 0)
+    notes = manifest.notes
+
+    assert "groups=" in notes and "holdout_groups=" in notes, "both counts are reported"
+    assert manifest.n_holdout_groups <= int(notes.split("groups=")[1].split()[0]), (
+        "the fold cannot hold out more groups than the corpus has"
+    )
