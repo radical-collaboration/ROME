@@ -44,11 +44,25 @@ def _row(n: int, *, group: str, x0: float, featured: bool = True,
     """One corpus row in the shape `corpus.record_to_row` produces."""
     metadata = {"scaffold": group}
     if featured:
-        metadata["embedding"] = [x0, 1.0]
+        # **The width comes from the registry**, not from a literal pair. asteer's J9 moved
+        # `pocket_preorg` from `standin-1`'s two columns to `pocket-geom-1`'s nine, and a
+        # corpus fitted at one width and served at another is the defect J8 closed on the
+        # property name and this closes on the shape.
+        from asteer.features import featuriser_for_model
+
+        width = featuriser_for_model("pocket_preorg").width
+        metadata["embedding"] = [x0] + [1.0] * (width - 1)
     return {
         "uid": f"lab-{n:03d}", "label_id": f"lab-{n:03d}", "node_id": f"n{n:06d}",
         "property_name": prop, "value": 2.0 * x0, "sigma": 0.05, "metadata": metadata,
     }
+
+
+def _seeded(x0: float = 1.0) -> list:
+    """One serving vector of Model B's declared width."""
+    from asteer.features import featuriser_for_model
+
+    return [x0] + [1.0] * (featuriser_for_model("pocket_preorg").width - 1)
 
 
 def _corpus(n_groups: int = 5, per_group: int = 4, prop: str = "preorg_rmsd") -> list:
@@ -321,7 +335,7 @@ def test_the_real_ensemble_reports_two_uncertainties(tmp_path):
 
     job = _job(tmp_path, _corpus(), epochs=40)
     predict = torch_ensemble(job["examples"], job)
-    mean, sigma = predict([[0.0, 1.0], [4.0, 1.0]])
+    mean, sigma = predict([_seeded(0.0), _seeded(4.0)])
     assert len(mean) == len(sigma) == 2
     assert all(s > 0.0 for s in sigma), "a zero sigma would make the NLL infinite"
 
@@ -406,7 +420,7 @@ def test_the_real_ensemble_is_written_and_loads_back(tmp_path):
     manifest = ModelRegistry(job["registry_root"]).read_manifest("pocket_preorg", 0)
     assert "weights=ensemble.pt" in manifest.notes
     loaded = load_state(version_dir, manifest)
-    mean, sigma = loaded([[1.0, 1.0]])
+    mean, sigma = loaded([_seeded()])
     assert abs(mean[0] - 2.0) < 1.0, "the corpus is y = 2*x0"
     assert sigma[0] > 0.0, "an ensemble that reports zero spread is reporting nothing"
 
@@ -453,8 +467,10 @@ def test_the_served_key_comes_from_the_weights_and_not_from_the_module_constant(
 
     _job_, version_dir = _fitted_version(tmp_path, property_name="rotamer_entropy")
     predict = preorg_predictor(version_dir)
-    values, sigmas = predict({"structure": "/designs/n1/complex.pdb",
-                              "pocket_selection": "A:112-140"})
+    # A vector rather than a path: this test is about which *key* the value is served under,
+    # and since asteer's J9 Model B's featuriser reads the file a payload names. The vector is
+    # the right width for it, which is what `embed` passes through.
+    values, sigmas = predict({"embedding": _seeded()})
 
     assert list(values) == ["rotamer_entropy"]
     assert list(sigmas) == ["rotamer_entropy"]

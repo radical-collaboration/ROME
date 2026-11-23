@@ -310,6 +310,11 @@ def test_importing_the_runner_pulls_in_no_torch():
 # -- the pump ----------------------------------------------------------------
 
 
+def _vector(width: int) -> list[float]:
+    """A synthetic vector of the featuriser's declared width."""
+    return [0.5] + [1.0] * (width - 1)
+
+
 def _label(label_id: str, prop: str, value: float, kind=None):
     from asteer.contracts import LabelKind, LabelRecord
     from asteer.features import embedding_metadata, featuriser_for_property
@@ -331,8 +336,14 @@ def _label(label_id: str, prop: str, value: float, kind=None):
         # agree because they share `asteer.features.embed` (D3) -- and since asteer's J4,
         # because they resolve the *same* featuriser for this property rather than sharing a
         # module-level default. `embed` has no default any more, on purpose.
+        #
+        # **A vector rather than a structure path, since asteer's J9.** This test is about the
+        # pump -- which labels are owed, taken and retired -- and `pocket-geom-1` reads the
+        # file a payload names. The fixture used to pass `/designs/{label_id}.pdb`, which was
+        # never on disk and worked only because `standin-1` hashed the string. The width comes
+        # from the featuriser so this keeps working when a model's featuriser changes again.
         metadata=embedding_metadata(
-            {"structure": f"/designs/{label_id}.pdb", "pocket_selection": "A:112-140"},
+            {"embedding": _vector(featuriser_for_property(prop).width)},
             featuriser=featuriser_for_property(prop),
         ),
     )
