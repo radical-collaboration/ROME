@@ -204,16 +204,46 @@ def _nll(y: Sequence[float], mean: Sequence[float], sigma: Sequence[float]) -> f
     return total / max(len(y), 1)
 
 
+def _r2(truth: Sequence[float], pred: Sequence[float]) -> Optional[float]:
+    """1 - SSE/SST, or None when the truth has no variance to explain.
+
+    None rather than 0.0 or 1.0: a corpus whose labels are all the same value has no R-squared,
+    and inventing one for it is how a degenerate fold reads as a result.
+    """
+    if len(truth) < 2:
+        return None
+    bar = sum(truth) / len(truth)
+    total = sum((t - bar) ** 2 for t in truth)
+    if total <= 0.0:
+        return None
+    return 1.0 - sum((t - p) ** 2 for t, p in zip(truth, pred)) / total
+
+
 def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], residual: Residual,
              fit: Fitter) -> Dict[str, Any]:
-    """Leave-one-out over 10–20 labels, which at this size is the only honest split.
+    """Leave-one-out over 10-20 labels, which at this size is the only honest split -- and,
+    separately, a real leave-one-GROUP-out when the groups allow one.
 
     A 20% holdout of twelve points is two points, and two points cannot calibrate anything.
     Leave-one-out refits n times, which costs seconds for a GP and buys every label a turn as
-    held-out evidence.
+    held-out evidence. That is `loo_r2`, and it is reported always.
+
+    **`logo_r2` used to be that same number under a grouped name** (item 73). The guard was
+    `len(groups) >= 3 and len(groups) == len({e["group"] ...})` -- which asks whether the
+    groups are *distinct*, the one condition under which leave-one-out and leave-one-group-out
+    coincide -- and then it published the leave-one-*out* residuals anyway. No fold held a
+    group out, no test caught it, and it became load-bearing the moment the promotion gate
+    landed, because the gate reads `logo_r2` to decide whether a version generalises off its
+    own scaffold cluster.
+
+    So the two are now two numbers. `logo_r2` refits once per held-out group, in the shape
+    `preorg_train_wrapper.evaluate` already used for Model B, and is **`None` with a reason**
+    when the groups cannot support one -- which the gate reads as `INSUFFICIENT_EVIDENCE`
+    rather than as a pass.
     """
     report: Dict[str, Any] = {
-        "nll": None, "calibration": None, "logo_r2": None, "holdout_n": 0,
+        "nll": None, "calibration": None, "loo_r2": None, "logo_r2": None,
+        "n_holdout_groups": None, "holdout_n": 0,
         "sigma_dg_mean": None, "n_labels": len(examples),
         "residual_version": residual.version, "validated": False, "reason": "",
     }
@@ -240,13 +270,43 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], residual: Resi
     report["sigma_dg_mean"] = sum(sigmas) / len(sigmas)
     report["validated"] = True
 
-    groups = sorted({str(e["group"]) for e in examples if e.get("group")})
-    if len(groups) >= 3 and len(groups) == len({e.get("group") for e in examples}):
-        bar = sum(truths) / len(truths)
-        total = sum((t - bar) ** 2 for t in truths)
-        if total > 0:
-            report["logo_r2"] = 1.0 - sum(
-                (t - m) ** 2 for t, m in zip(truths, means)) / total
+    # Leave-one-OUT, named as such. It is what the n refits above already computed, and it is
+    # a real number worth reporting -- it just is not a grouped one.
+    report["loo_r2"] = _r2(truths, means)
+
+    # Leave-one-GROUP-out: one refit per group, each predicting only the group it held out.
+    # Ungrouped records are excluded rather than pooled into a nameless group, for the reason
+    # `preorg.py::_group_of` gives: a group nobody assigned is not a group.
+    grouped = [e for e in examples if e.get("group")]
+    groups = sorted({str(e["group"]) for e in grouped})
+    report["n_holdout_groups"] = len(groups)
+    if len(groups) < 3:
+        report["reason"] = (
+            f"{len(groups)} scaffold clusters among {len(grouped)} grouped labels: a "
+            "leave-one-group-out estimate needs at least three, and is near-meaningless "
+            "below about four. loo_r2, nll and calibration are reported; logo_r2 is not "
+            "invented."
+        )
+        return report
+
+    pooled_truth: List[float] = []
+    pooled_pred: List[float] = []
+    for held in groups:
+        inner_train = [e for e in grouped if str(e["group"]) != held]
+        inner_test = [e for e in grouped if str(e["group"]) == held]
+        if len(inner_train) < 2 or not inner_test:
+            continue
+        inner_mean, _ = fit(inner_train, job)([e["z"] for e in inner_test])
+        pooled_pred.extend(inner_mean)
+        pooled_truth.extend(e["residual"] for e in inner_test)
+    if len(pooled_truth) >= 3:
+        report["logo_r2"] = _r2(pooled_truth, pooled_pred)
+    if report["logo_r2"] is None:
+        report["reason"] = (
+            f"{len(groups)} clusters, and no grouped fold produced one: every split left "
+            "fewer than two training labels, or the held-out residuals had no variance. "
+            "logo_r2 is not invented."
+        )
     return report
 
 
@@ -302,6 +362,7 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
     import datetime  # noqa: PLC0415
 
     from asteer.contracts import ModelManifest  # noqa: PLC0415
+    from asteer.features import FEATURISER_FOR_MODEL  # noqa: PLC0415
     from asteer.registry import ModelRegistry  # noqa: PLC0415
 
     registry = ModelRegistry(job["registry_root"])
@@ -317,12 +378,24 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
         calibration=report["calibration"],
         logo_r2=report["logo_r2"],
         holdout_n=report["holdout_n"],
+        # The gate reads the HOLDOUT group count, not the corpus one (asteer J5, measured in
+        # J2: an honest clustering of this data is mostly singletons, so a corpus-wide count
+        # clears a bar of four for free).
+        n_holdout_groups=report["n_holdout_groups"],
+        # Resolved here rather than carried in the job, so a driver cannot name a featuriser
+        # the model does not use. This wrapper runs inside the task and already imports from
+        # asteer; the driver, which is constructed in the campaign process, still imports
+        # nothing (CON-4).
+        featuriser=FEATURISER_FOR_MODEL.get(str(job["model_id"])),
+        trained_on=str(job.get("property_name") or ""),
         min_holdout_n=int(job["min_labels"]),
         min_effect_size=float(job["min_effect_size"]),
         train_seconds_cpu=elapsed,
         promoted=False,
         notes=" ".join(filter(None, [
             str(job.get("notes") or ""),
+            # Leave-one-OUT, reported beside the grouped one and never as it (item 73).
+            f"loo_r2={report['loo_r2']}" if report["loo_r2"] is not None else "",
             # Which prior this version corrects. Without it a `v0` is an unlabelled starting
             # point rather than "public residual R, zero in-house labels".
             f"residual=v{report['residual_version']}",

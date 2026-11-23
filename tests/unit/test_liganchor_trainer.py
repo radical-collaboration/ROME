@@ -50,7 +50,7 @@ def _action(atoms, structure: str = "/tmp/lig.pdb", resname: str = "LIG") -> dic
 
 
 def _record(n: int, atoms, value: float, *, group: str = "sc0",
-            prop: str = "dg_abfe", action: dict | None = None) -> dict:
+            prop: str = "dg_corrected", action: dict | None = None) -> dict:
     """One `LabelRecord` row as `corpus.record_to_row` hands it over."""
     metadata: dict = {"scaffold": group}
     if action is not False:
@@ -178,7 +178,7 @@ def test_a_min_pairs_floor_below_two_is_refused():
 def test_the_scorer_names_the_campaign_and_is_never_itgts_proxy():
     """`itgt` refuses to compare a proxy-fit artifact against a campaign-scored one, which
     only works if a campaign round says which it is."""
-    assert LigAnchorConfig().resolved_scorer() == "asd:dg_abfe"
+    assert LigAnchorConfig().resolved_scorer() == "asd:dg_corrected"
     assert LigAnchorConfig().resolved_scorer() != "proxy"
 
 
@@ -421,8 +421,8 @@ def test_the_real_itgt_head_ranks_a_corpus_it_was_fitted_on(tmp_path):
             "outcome_value": -7.0 - 0.8 * hits + 0.01 * i,
         })
 
-    job = {"property_name": "dg_abfe", "direction": -1, "epochs": 150, "seed": 0,
-           "scorer": "asd:dg_abfe", "encoder_path": ""}
+    job = {"property_name": "dg_corrected", "direction": -1, "epochs": 150, "seed": 0,
+           "scorer": "asd:dg_corrected", "encoder_path": ""}
     scores = itgt_head(pairs, job)(pairs)
     assert len(scores) == len(pairs)
 
@@ -524,7 +524,7 @@ def test_the_real_head_is_written_as_an_itgt_artifact_and_loads_back(tmp_path):
 
     meta = json.loads(Path(version_dir, "head", "meta.json").read_text())
     assert meta["kind"] == "MILHead"
-    assert meta["scorer"] == "asd:dg_abfe", (
+    assert meta["scorer"] == "asd:dg_corrected", (
         "itgt refuses to compare a proxy-fit artifact against a campaign-scored one, which "
         "only works if a campaign round names itself"
     )
