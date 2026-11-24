@@ -33,14 +33,31 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from rome.train.base import TrainTask
 
 __all__ = [
+    "DEFAULT_PROPERTIES",
     "DEFAULT_PROPERTY",
+    "DERIVED_PROPERTY",
     "PocketPreorgConfig",
     "PocketPreorgTrainer",
 ]
 
-#: The label B is trained against. One property per round: the three B predicts are three
-#: regressions sharing a corpus, not one multi-output head, so a round names which it is.
+#: The label B is trained against when a round names nothing else.
 DEFAULT_PROPERTY = "preorg_rmsd"
+
+#: **All four metrics `preorg_score/spec.yaml` puts in `metrics_reported`**, which is the
+#: contract a missing one breaks by the toolkit's own rule. The first three are regressed; the
+#: fourth is derived in the stream from the three and is never a label (decision L2), so it is
+#: not in `DEFAULT_PROPERTIES` and cannot be.
+#:
+#: Three regressions sharing a corpus, **not one multi-output head** -- `properties` is a tuple
+#: of rounds-within-a-round rather than a widening of the output layer, because the three
+#: quantities have different units, different scales and different noise, and a shared head
+#: would make the loss weight them against each other with no one having chosen the weights.
+DEFAULT_PROPERTIES: tuple = (DEFAULT_PROPERTY, "rotamer_entropy", "ligand_rmsf")
+
+#: The one metric B reports that is derived rather than measured (decision L2). Named here
+#: because `preorg_predictor` derives it and `PROPERTIES_FOR_MODEL` must never contain it: a
+#: version "fitted on" it would be a version fitted on its own judgement.
+DERIVED_PROPERTY = "induced_fit_risk"
 
 #: Where a record carries its feature vector and its scaffold cluster. Both live under the
 #: `LabelRecord.metadata` dict rather than in the contract, because the embedding comes from a
@@ -61,7 +78,9 @@ class PocketPreorgConfig:
 
     model_id: str = "pocket_preorg"
     registry_root: str = "models"
-    property_name: str = DEFAULT_PROPERTY
+    #: Which properties this round fits, in order. One ensemble each, all in one round and
+    #: one `ensemble.pt`, which is what closes the four-metric contract gap (item 72).
+    properties: tuple = DEFAULT_PROPERTIES
     feature_key: str = FEATURE_KEY
     group_key: str = GROUP_KEY
     n_members: int = 5
@@ -123,22 +142,41 @@ class PocketPreorgTrainer(TrainTask):
         constant and report it as a model.
         """
         super().validate(dataset)
+        if not self.config.properties:
+            raise ValueError(f"{self.name}: a round must name at least one property to fit")
+        if len(set(self.config.properties)) != len(self.config.properties):
+            raise ValueError(
+                f"{self.name}: {list(self.config.properties)} names a property twice. Two "
+                "ensembles under one key would overwrite each other in `ensemble.pt`"
+            )
+        if DERIVED_PROPERTY in self.config.properties:
+            raise ValueError(
+                f"{self.name}: {DERIVED_PROPERTY!r} is DERIVED from the three measured "
+                "quantities and never measured (decision L2), so there is no label to fit it "
+                "against. A round that claimed to fit it would be fitting its own judgement"
+            )
         records = list(dataset)
-        with_target = [r for r in records if r.get("property_name") == self.config.property_name]
-        if not with_target:
+        # **Every named property, not just the first.** A round that fitted two of three and
+        # published would leave `metrics_reported` failing on the third -- an integrity failure
+        # by the toolkit's own rule -- and the version would look complete.
+        missing = [p for p in self.config.properties
+                   if not any(r.get("property_name") == p for r in records)]
+        if missing:
             raise ValueError(
                 f"{self.name}: no record in a corpus of {len(records)} carries "
-                f"property_name={self.config.property_name!r}. A round with no targets would "
-                "fit nothing and publish a version saying so in metrics nobody reads"
+                f"property_name in {missing}. A round with no targets for a property it "
+                "names would fit nothing for it and publish a version saying so in metrics "
+                "nobody reads"
             )
-        featured = [r for r in with_target if _features_of(r, self.config.feature_key)]
-        if not featured:
-            raise ValueError(
-                f"{self.name}: {len(with_target)} records carry the target and none carries "
-                f"metadata[{self.config.feature_key!r}]. Training on an empty feature set "
-                "produces a model that predicts the corpus mean and reports a plausible NLL "
-                "for doing it"
-            )
+        for prop in self.config.properties:
+            with_target = [r for r in records if r.get("property_name") == prop]
+            if not any(_features_of(r, self.config.feature_key) for r in with_target):
+                raise ValueError(
+                    f"{self.name}: {len(with_target)} records carry {prop!r} and none carries "
+                    f"metadata[{self.config.feature_key!r}]. Training on an empty feature set "
+                    "produces a model that predicts the corpus mean and reports a plausible "
+                    "NLL for doing it"
+                )
 
     def as_command(self, dataset: Any, output_dir: str,
                    **kwargs: Any) -> Optional[Tuple[str, str]]:
@@ -176,9 +214,11 @@ class PocketPreorgTrainer(TrainTask):
         for a round to train on a different corpus than the one that was checked.
         """
         config = self.config
+        wanted = set(config.properties)
         examples: List[Dict[str, Any]] = []
         for record in records:
-            if record.get("property_name") != config.property_name:
+            prop = record.get("property_name")
+            if prop not in wanted:
                 continue
             features = _features_of(record, config.feature_key)
             if not features:
@@ -190,12 +230,16 @@ class PocketPreorgTrainer(TrainTask):
                 "x": features,
                 "y": float(record["value"]),
                 "sigma": record.get("sigma"),
+                # Which regression this row belongs to. On the row rather than in a nested
+                # structure, because the wrapper groups by it and a flat list is what the job
+                # JSON already carried -- one shape, one selection.
+                "property_name": str(prop),
             })
         job = {
             "model_id": config.model_id,
             "registry_root": os.path.abspath(config.registry_root),
             "output_dir": os.path.abspath(output_dir),
-            "property_name": config.property_name,
+            "properties": list(config.properties),
             "n_members": config.n_members,
             "hidden": list(config.hidden),
             "epochs": config.epochs,

@@ -38,13 +38,40 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 #: ROME and can be run as a bare script on an allocation.
 TRAIN_COMPLETE_MARKER = "train_complete"
 
-__all__ = ["run_round", "main", "scaffold_split", "evaluate", "Ensemble", "load_state",
-           "preorg_predictor", "STATE_NAME", "TRAIN_COMPLETE_MARKER"]
+__all__ = ["run_round", "main", "scaffold_split", "evaluate", "Ensemble", "Bundle",
+           "load_state", "preorg_predictor", "STATE_NAME", "TRAIN_COMPLETE_MARKER",
+           "DERIVED_PROPERTY", "SCALE_FLOOR", "SERVED_PROPERTIES"]
 
 #: Where a published version keeps its weights. `ModelRegistry.version_dir` reserves the
 #: directory and deliberately prescribes no format -- *"a trainer writes its weights in here
 #: in whatever shape it likes"* -- so the name is the trainer's to declare and the stream's
 #: loader to read.
+#: The one metric Model B reports that is derived rather than measured (decision L2).
+#:
+#: **Spelled here and in `preorg.py`, with a test asserting the two agree** -- the same shape
+#: item 66 settled for `PROPERTY_FOR_METRIC`. The driver must import nothing heavy (CON-4) and
+#: this module owns torch, so the wrapper cannot import the driver and the driver cannot import
+#: the wrapper. A test is what keeps one string one string.
+DERIVED_PROPERTY = "induced_fit_risk"
+
+#: The three quantities a served version must hold, because `preorg_score/spec.yaml` puts all
+#: four of its metrics in `metrics_reported` and a missing one is an integrity failure by the
+#: toolkit's own rule.
+#:
+#: A round may name fewer -- a corpus with only one label type is a real situation and fitting
+#: it is honest -- but the result is **not servable**, and `preorg_predictor` says so by name
+#: rather than serving three keys and omitting the fourth. `sigmoid(z)` over one quantity is a
+#: perfectly good number and a different one from the judgement over three, and giving it the
+#: same name is how a metric quietly changes meaning between versions.
+SERVED_PROPERTIES: tuple = ("preorg_rmsd", "rotamer_entropy", "ligand_rmsf")
+
+#: The smallest standard deviation a property's corpus may have before the z-score stops
+#: meaning anything. A corpus whose labels are all equal has no scale, and dividing by zero
+#: would make every z infinite rather than undefined -- so the floor is what keeps the risk a
+#: number, and it is large enough that a degenerate corpus produces a risk near 0.5 rather
+#: than a confident 0 or 1.
+SCALE_FLOOR = 1e-6
+
 STATE_NAME = "ensemble.pt"
 
 Predictor = Callable[[Sequence[Sequence[float]]], Tuple[List[float], List[float]]]
@@ -272,12 +299,18 @@ class Ensemble:
         return STATE_NAME
 
 
-def load_state(version_dir: str, manifest: Any = None) -> Ensemble:
-    """The `build` a stream hands `surrogate_stream`: a version directory in, a predictor out.
+def load_state(version_dir: str, manifest: Any = None) -> Bundle:
+    """The `build` a stream hands `surrogate_stream`: a version directory in, a `Bundle` out.
 
     Raises when the directory holds no weights, which `streams.load_promoted` turns into an
     `Unavailable` naming the directory. A loader that fell back to an untrained ensemble would
     serve a confident-looking sigma from no evidence at all.
+
+    **A pre-J12 single-property state file is refused by name**, not silently adapted. Its
+    numbers are fine; what it does not carry is the corpus scale, and without that
+    `induced_fit_risk` cannot be derived -- so serving it would mean either omitting a metric
+    `metrics_reported` requires or inventing the scale here, and the second is how a risk
+    acquires a unit nobody wrote down.
     """
     import torch  # noqa: PLC0415
 
@@ -288,17 +321,23 @@ def load_state(version_dir: str, manifest: Any = None) -> Ensemble:
             "and no weights, so there is nothing to serve"
         )
     state = torch.load(path, map_location="cpu", weights_only=False)
-    job = {"n_members": state["n_members"], "hidden": state["hidden"],
-           # Written by `save` since J8. A state file from before then carries neither, and
-           # `preorg_predictor` refuses it by name rather than guessing -- an ensemble that
-           # cannot say what it fitted is one whose numbers cannot be served under any key.
-           "property_name": state.get("property_name", ""),
-           "featuriser": state.get("featuriser", "")}
-    members = _nets(int(state["n_features"]), job)
-    for net, weights in zip(members, state["members"]):
-        net.load_state_dict(weights)
-        net.eval()
-    return Ensemble(members, job, int(state["n_features"]))
+    if "ensembles" not in state:
+        raise ValueError(
+            f"{version_dir} holds a single-property ensemble, written before J12. It carries "
+            "no corpus scale, so `induced_fit_risk` cannot be derived from it -- and "
+            f"`preorg_score` requires all four metrics. Refit the round; it now fits "
+            "every property it names in one pass."
+        )
+    ensembles: Dict[str, Any] = {}
+    for prop, saved in state["ensembles"].items():
+        job = {"n_members": saved["n_members"], "hidden": saved["hidden"],
+               "property_name": prop, "featuriser": state.get("featuriser", "")}
+        members = _nets(int(saved["n_features"]), job)
+        for net, weights in zip(members, saved["members"]):
+            net.load_state_dict(weights)
+            net.eval()
+        ensembles[prop] = Ensemble(members, job, int(saved["n_features"]))
+    return Bundle(ensembles, state.get("scale") or {}, state.get("featuriser", ""))
 
 
 def preorg_predictor(version_dir: str, manifest: Any = None):
@@ -346,15 +385,31 @@ def preorg_predictor(version_dir: str, manifest: Any = None):
     )
     featuriser = featuriser_for_model(model_id)
 
-    # The property this version regresses on, READ FROM THE WEIGHTS. One per round by design
-    # -- the three B predicts are three regressions sharing a corpus, not one multi-output
-    # head -- so which one it was is a fact about the fit, not about the driver's import.
-    prop = ensemble.property_name
-    if not prop:
+    # The properties this version regresses on, READ FROM THE WEIGHTS. Three regressions
+    # sharing a corpus, not one multi-output head -- which ones a version holds is a fact
+    # about the fit, not about the driver's import.
+    props = ensemble.properties
+    if not props:
         raise ValueError(
-            f"{version_dir} holds an ensemble that does not name the property it fitted. It "
-            "was written before J8, and serving it would mean choosing a key for it here, "
-            "which is the defect J8 removed. Refit the round."
+            f"{version_dir} holds a bundle that names no property. Serving it would mean "
+            "choosing a key for it here, which is the defect J8 removed. Refit the round."
+        )
+    unservable = [p for p in SERVED_PROPERTIES if p not in props]
+    if unservable:
+        raise ValueError(
+            f"{version_dir} holds {props} and `preorg_score` requires "
+            f"{list(SERVED_PROPERTIES)} plus the derived {DERIVED_PROPERTY!r} in "
+            f"`metrics_reported`, so it is missing {unservable}. Serving three keys and "
+            "omitting the fourth is an integrity failure by the toolkit's own rule. The round "
+            "that produced this fitted what it named; name all three and refit."
+        )
+    missing_scale = [p for p in props if p not in ensemble.scale]
+    if missing_scale:
+        raise ValueError(
+            f"{version_dir} carries no corpus scale for {missing_scale}, so "
+            f"{DERIVED_PROPERTY!r} cannot be z-scored against it. The risk is a judgement "
+            "over three quantities with different units; without their scale it is a number "
+            "with a unit nobody wrote down (J12, decision L2)."
         )
     if not ensemble.featuriser:
         raise ValueError(
@@ -372,8 +427,15 @@ def preorg_predictor(version_dir: str, manifest: Any = None):
         )
 
     def predict(features):
-        (mean,), (sigma,) = ensemble([embed(features, featuriser=featuriser)])
-        return {prop: mean}, {prop: sigma}
+        row = embed(features, featuriser=featuriser)
+        means, sigmas = ensemble([row])
+        value = {prop: means[prop][0] for prop in props}
+        sigma = {prop: sigmas[prop][0] for prop in props}
+        # **The risk is derived here and never measured** (decision L2), and here is the
+        # stream rather than the agent because the scale it z-scores against is a fact about
+        # the fit. `PreorgScoreAgent` only passes values through; it has no corpus.
+        value[DERIVED_PROPERTY], sigma[DERIVED_PROPERTY] = ensemble.risk(value, sigma)
+        return value, sigma
 
     return predict
 
@@ -434,6 +496,103 @@ def _featuriser_for(job: Dict[str, Any]) -> str:
     return FEATURISER_FOR_MODEL.get(str(job.get("model_id") or ""), "")
 
 
+class Bundle:
+    """One round's worth of Model B: an `Ensemble` per property, and the corpus scale.
+
+    **One artifact, not three**, because a version is one promotion decision: three files in a
+    version directory would let a reader see two properties served from a version whose third
+    never fitted, and `metrics_reported` would fail with the version looking complete.
+
+    The **scale is what makes `induced_fit_risk` derivable at all** (J12). The risk is a
+    judgement over three quantities with different units, so it needs each one's corpus mean
+    and standard deviation to z-score against -- and those are a fact about the *fit*, not
+    about the request, so they travel with the weights. `PreorgScoreAgent` has no access to
+    them, which is exactly why decision L2's risk is derived in the stream and not in the
+    agent: a risk without a scale is a number with a unit nobody wrote down.
+    """
+
+    #: The three weights of the risk combination. **Declared, not fitted**, and a tuple rather
+    #: than a parameter so that changing them is a diff somebody reads. There is no
+    #: `induced_fit_risk` ground truth anywhere, so a fitted weight would be evidence that is
+    #: not there, dressed as a measurement.
+    RISK_WEIGHTS: Dict[str, float] = {}
+
+    def __init__(self, ensembles: Dict[str, Any], scale: Dict[str, Any],
+                 featuriser: str = "") -> None:
+        self.ensembles = dict(ensembles)
+        #: property -> (mean, sd) over that property's training rows. `sd` is floored, because
+        #: a corpus whose labels are all equal has no scale and a zero divisor would make
+        #: every z-score infinite rather than undefined.
+        self.scale = {k: (float(v[0]), max(float(v[1]), SCALE_FLOOR))
+                      for k, v in scale.items()}
+        self.featuriser = str(featuriser)
+
+    @property
+    def properties(self) -> List[str]:
+        """In the order the round named them, which is the order the metrics are reported."""
+        return list(self.ensembles)
+
+    def __call__(self, rows: Sequence[Sequence[float]]
+                 ) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
+        means: Dict[str, List[float]] = {}
+        sigmas: Dict[str, List[float]] = {}
+        for prop, ensemble in self.ensembles.items():
+            mean, sigma = ensemble(rows)
+            means[prop], sigmas[prop] = list(mean), list(sigma)
+        return means, sigmas
+
+    def risk(self, means: Dict[str, float], sigmas: Dict[str, float]) -> Tuple[float, float]:
+        """`sigmoid(mean(z))` over the three z-scores, and its propagated sigma.
+
+        **All three quantities are minimised**, so a prediction above the corpus mean is a
+        pocket that reorganises more than the corpus typically does -- which is what the risk
+        is about. A positive mean z therefore means higher risk, and `sigmoid` is what bounds
+        it into the [0, 1] the acquisition rule compares against a ceiling.
+
+        The sigma is the sigmoid's derivative times the combined z sigma, which is the
+        ordinary first-order propagation and is *declared* as such: it is exact for a linear
+        map and an approximation here, and the alternative -- reporting no sigma -- is the one
+        thing `acquisition.rank` refuses a candidate for.
+        """
+        absent = [p for p in SERVED_PROPERTIES if p not in self.ensembles]
+        if absent:
+            raise ValueError(
+                f"{DERIVED_PROPERTY} is the judgement over {list(SERVED_PROPERTIES)} and this "
+                f"bundle holds {self.properties}, missing {absent}. A sigmoid over fewer "
+                "quantities is a perfectly good number and a different one; giving it this "
+                "name is how a metric changes meaning between versions"
+            )
+        weights = self.RISK_WEIGHTS or {p: 1.0 / len(self.ensembles) for p in self.ensembles}
+        total = sum(weights.get(p, 0.0) for p in self.ensembles) or 1.0
+        z_mean = 0.0
+        z_var = 0.0
+        for prop in self.ensembles:
+            centre, spread = self.scale[prop]
+            w = weights.get(prop, 0.0) / total
+            z_mean += w * (float(means[prop]) - centre) / spread
+            z_var += (w * float(sigmas[prop]) / spread) ** 2
+        value = 1.0 / (1.0 + math.exp(-z_mean))
+        return value, value * (1.0 - value) * math.sqrt(z_var)
+
+    def save(self, version_dir: str) -> str:
+        import torch  # noqa: PLC0415
+
+        path = os.path.join(version_dir, STATE_NAME)
+        torch.save({
+            # Keyed by property, so a reader can see which ones a version holds without
+            # loading torch modules, and so a missing one is missing by name.
+            "ensembles": {
+                prop: {"hidden": e.hidden, "n_members": e.n_members,
+                       "n_features": e.n_features,
+                       "members": [m.state_dict() for m in e.members]}
+                for prop, e in self.ensembles.items()
+            },
+            "scale": {k: list(v) for k, v in self.scale.items()},
+            "featuriser": self.featuriser,
+        }, path)
+        return STATE_NAME
+
+
 def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
     """Evaluate held out, fit on everything, write the weights, publish unpromoted.
 
@@ -450,18 +609,62 @@ def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
     started = time.process_time()
     output_dir = job["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
-    examples = list(job["examples"])
     fitter = fit or torch_ensemble
-    report = evaluate(examples, job, fitter)
+    properties = [str(p) for p in job.get("properties") or []]
+    if not properties:
+        raise ValueError(
+            f"{job.get('model_id')}: the job names no properties. A round that fitted "
+            "whatever happened to be in the corpus would publish a version nobody can say "
+            "what it predicts"
+        )
+
+    by_property = {prop: [e for e in job["examples"]
+                          if str(e.get("property_name") or "") == prop]
+                   for prop in properties}
+    missing = [p for p, rows in by_property.items() if not rows]
+    if missing:
+        raise ValueError(
+            f"{job.get('model_id')}: the job names {properties} and carries no example for "
+            f"{missing}. The driver's `validate` checks this against the corpus; a job that "
+            "reaches here without them was built by something else"
+        )
+
+    # **One report per property, and the manifest carries the worst of each.** A version is one
+    # promotion decision over three regressions, so promoting on the best of them would serve
+    # two keys on a third's strength -- and `preorg_score`'s clients read each key as its own
+    # quantity. The per-property numbers are in `metrics.json` and in the notes; the gate reads
+    # the conservative ones.
+    reports = {prop: evaluate(rows, job, fitter) for prop, rows in by_property.items()}
+    report = _worst_of(reports, properties)
 
     weights = "none"
-    if len(examples) >= 2:
-        final = fitter(examples, job)
-        saver = getattr(final, "save", None)
-        if saver is not None:
-            os.makedirs(_version_dir(job), exist_ok=True)
-            weights = saver(_version_dir(job))
+    fitted: Dict[str, Any] = {}
+    scale: Dict[str, Any] = {}
+    for prop, rows in by_property.items():
+        if len(rows) < 2:
+            continue
+        fitted[prop] = fitter(rows, job)
+        ys = [float(e["y"]) for e in rows]
+        centre = sum(ys) / len(ys)
+        spread = math.sqrt(sum((y - centre) ** 2 for y in ys) / len(ys))
+        scale[prop] = (centre, spread)
+    if len(fitted) == len(properties) and all(hasattr(m, "save") for m in fitted.values()):
+        bundle = Bundle(fitted, scale, featuriser=_featuriser_name(job))
+        os.makedirs(_version_dir(job), exist_ok=True)
+        weights = bundle.save(_version_dir(job))
+    elif fitted:
+        # Partial is not a version. Two properties served and a third absent would fail
+        # `metrics_reported` -- an integrity failure by the toolkit's own rule -- while the
+        # manifest looked complete, so the round publishes metrics and no weights instead.
+        report["reason"] = (
+            (report.get("reason") or "")
+            + f" Fitted {sorted(fitted)} of {properties}; a partial bundle is not published, "
+            "because `metrics_reported` requires all four keys and a version missing one "
+            "would be an integrity failure wearing a complete manifest."
+        ).strip()
+        report["validated"] = False
     report["weights"] = weights
+    report["per_property"] = reports
     elapsed = time.process_time() - started
 
     version = _publish(job, report, elapsed)
@@ -472,6 +675,39 @@ def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
     with open(os.path.join(output_dir, TRAIN_COMPLETE_MARKER), "w") as fh:
         fh.write(str(version))
     return output_dir
+
+
+def _worst_of(reports: Dict[str, Dict[str, Any]], order: Sequence[str]) -> Dict[str, Any]:
+    """One report from several: the **most conservative** value of each field.
+
+    Worst and not mean, for the reason the loop above gives: a mean would let a strong
+    regression carry a weak one past the gate, and the three keys are read separately by
+    clients who have no way to know which one the number came from. So the NLL is the highest,
+    the calibration the furthest from 1, `logo_r2` the lowest, the counts the smallest, and
+    `validated` is an AND -- a version is validated when every property it serves is.
+    """
+    out: Dict[str, Any] = dict(reports[order[0]])
+    for prop in order[1:]:
+        other = reports[prop]
+        for key, pick in (("nll", max), ("logo_r2", min),
+                          ("holdout_n", min), ("n_groups", min), ("n_holdout_groups", min)):
+            a, b = out.get(key), other.get(key)
+            out[key] = b if a is None else (a if b is None else pick(a, b))
+        # Calibration is a mean squared z-score, so 1.0 is right and either side is wrong:
+        # the worst is the one furthest from it, which neither max nor min expresses.
+        a, b = out.get("calibration"), other.get("calibration")
+        if a is None or (b is not None and abs(b - 1.0) > abs(a - 1.0)):
+            out["calibration"] = b
+        out["validated"] = bool(out.get("validated")) and bool(other.get("validated"))
+    reasons = [f"{p}: {reports[p]['reason']}" for p in order if reports[p].get("reason")]
+    out["reason"] = " | ".join(reasons)
+    return out
+
+
+def _featuriser_name(job: Dict[str, Any]) -> str:
+    from asteer.features import FEATURISER_FOR_MODEL  # noqa: PLC0415
+
+    return str(FEATURISER_FOR_MODEL.get(str(job.get("model_id") or "")) or "")
 
 
 def _registry(job: Dict[str, Any]):
@@ -518,7 +754,11 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
         # the gate's bar of four for free while the grouped fold may average over one.
         n_holdout_groups=report["n_holdout_groups"],
         featuriser=_featuriser_for(job),
-        trained_on=str(job["property_name"]),
+        # **Every property this round fitted**, comma-joined. The gate splits it and requires
+        # each one to be a property this model may serve (asteer J12): a version that fitted
+        # two of its own and one of somebody else's is not promotable on the strength of the
+        # two, because `preorg_score`'s clients read each key as its own quantity.
+        trained_on=",".join(str(p) for p in job["properties"]),
         min_holdout_n=int(job["min_holdout_n"]),
         min_effect_size=float(job["min_effect_size"]),
         # CPU wall clock, as what it is. Never converted into a GPU-hour (backlog item 48).
@@ -526,7 +766,7 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
         promoted=False,
         notes=" ".join(filter(None, [
             str(job.get("notes") or ""),
-            f"property={job['property_name']}",
+            f"properties={'+'.join(str(p) for p in job['properties'])}",
             # Both counts, because they answer different questions and J2 showed how far
             # apart they can be: how many clusters the corpus has, and how many the grouped
             # fold actually held out.

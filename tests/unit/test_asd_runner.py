@@ -243,7 +243,11 @@ def test_the_property_each_trainer_filters_on_is_the_one_the_label_store_writes(
         trainer = surrogates[model_id].manager.trainer.config.trainer
         assert trainer.config.property_name == runner.ABFE_PROPERTY, model_id
     b = surrogates[streams.MODEL_B].manager.trainer.config.trainer
-    assert b.config.property_name == "preorg_rmsd"
+    # Model B names all three since J12, and the runner resolves each through the same
+    # mapping rather than writing any of them out -- so a change to the naming contract
+    # reaches B's round the same way it reaches C's.
+    assert b.config.properties == runner.PREORG_PROPERTIES
+    assert b.config.properties == ("preorg_rmsd", "rotamer_entropy", "ligand_rmsf")
 
 
 @pytest.mark.parametrize("build, model_id", [

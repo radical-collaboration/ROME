@@ -120,7 +120,16 @@ import rome
 from asteer.labels_workflow import PROPERTY_FOR_METRIC  # noqa: E402
 
 ABFE_PROPERTY = PROPERTY_FOR_METRIC["dg_abfe"][0]
-PREORG_PROPERTY = PROPERTY_FOR_METRIC["preorg_rmsd"][0]
+
+#: Model B's three, resolved through the naming contract rather than written out, and passed
+#: explicitly for the reason the comment above gives. All three in one round since J12: a
+#: version that served two of `preorg_score`'s metrics and not the third would fail
+#: `metrics_reported`, which is an integrity failure by the toolkit's own rule.
+PREORG_PROPERTIES = tuple(
+    PROPERTY_FOR_METRIC[metric][0]
+    for metric in ("preorg_rmsd", "rotamer_entropy", "ligand_rmsf")
+)
+PREORG_PROPERTY = PREORG_PROPERTIES[0]
 
 __all__ = [
     "Settings", "Surrogate",
@@ -420,7 +429,7 @@ def _trainers(settings: Settings) -> Dict[str, Any]:
             PocketPreorgConfig(
                 model_id=streams.MODEL_B,
                 registry_root=settings.registry_root,
-                property_name=PREORG_PROPERTY,
+                properties=PREORG_PROPERTIES,
             ),
             gpus=gpus[streams.MODEL_B],
         ),
