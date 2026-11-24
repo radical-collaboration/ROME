@@ -162,6 +162,69 @@ def test_an_ungrouped_corpus_refuses_to_split_rather_than_splitting_randomly():
     assert scaffold_split(examples, 0.5) == ([], [])
 
 
+def test_the_split_is_asteer_s_rule_and_not_a_second_copy_of_it():
+    """Item 50, closed on this side. One rule, two repos, and its failure is silent.
+
+    The same rule was implemented here over corpus rows and in AuCaM's `acquisition.py` over
+    `Candidate` objects. What this asserts is not that the arithmetic is *correct* -- asteer's
+    own tests do that, including against both copies this replaced -- but that this function
+    is a thin wrapper over it, so the two cannot drift.
+    """
+    from asteer.grouping import holdout_indices
+
+    examples = [{"group": g, "x": [0.0], "y": 0.0} for g in list("aaaabbbccd")]
+    train, holdout = scaffold_split(examples, 0.3)
+    train_at, holdout_at = holdout_indices([e["group"] for e in examples], 0.3)
+
+    assert [examples[i] for i in train_at] == train
+    assert [examples[i] for i in holdout_at] == holdout
+
+
+def test_the_metadata_keys_this_driver_reads_are_the_ones_asteer_writes():
+    """Two strings in two distributions, kept equal by a test -- `TRAIN_COMPLETE_MARKER`'s
+    shape, and for the same reason: the driver imports nothing heavy at module scope, so it
+    mirrors the constant instead of importing it. A mismatch would make every round report
+    insufficient evidence with nothing wrong anywhere that a reader could see."""
+    from asteer.features import EMBEDDING_KEY
+    from asteer.grouping import SCAFFOLD_KEY
+
+    from examples.impress.small_molecule_binding import preorg
+
+    assert preorg.GROUP_KEY == SCAFFOLD_KEY
+    assert preorg.FEATURE_KEY == EMBEDDING_KEY
+
+
+def test_a_round_over_grouped_labels_returns_a_verdict_at_last(tmp_path):
+    """**The first B round in this project's history that is not `INSUFFICIENT_EVIDENCE`.**
+
+    Nothing assigned `metadata["scaffold"]` until J20 (item 71), so `_group_of` returned
+    `None` for every row, `scaffold_split` returned `([], [])`, and the gate read *"holdout
+    groups unknown"*. Model B could not be validated, whatever the labels cost.
+
+    Six clusters of eight designs: the holdout is one whole cluster of 8, which clears the
+    gate's `min_holdout_n` of 8, and the leave-one-group-out averages over six groups, which
+    clears `min_holdout_groups` of 4. The verdict may be `HOLD` -- the stand-in fitter is
+    exact, so its sigma is a floor and the calibration number says so -- and `HOLD` is a
+    verdict: *"we looked and it is not promotable"* is what CON-13 exists to distinguish from
+    *"we could not tell"*.
+    """
+    from asteer.promotion import PromotionOutcome, decide
+
+    job = _job(tmp_path, _corpus(n_groups=6, per_group=8))
+    run_round(job, fit=_linear_fit)
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("pocket_preorg", 0)
+
+    assert manifest.holdout_n >= 8
+    assert manifest.n_holdout_groups >= 4
+    assert manifest.logo_r2 is not None, "a grouped score, from groups that exist"
+
+    decision = decide(manifest)
+    assert decision.outcome is not PromotionOutcome.INSUFFICIENT_EVIDENCE, (
+        f"still no verdict: {decision.rule} -- {decision.reason}"
+    )
+    assert decision.outcome in (PromotionOutcome.PROMOTE, PromotionOutcome.HOLD)
+
+
 # -- what reaches the manifest -----------------------------------------------
 
 

@@ -93,25 +93,30 @@ def scaffold_split(examples: Sequence[Dict[str, Any]], fraction: float,
     deterministic given the same clusters. Returns `([], [])` when any example is ungrouped:
     the caller reports insufficient evidence rather than falling back to a random split.
 
-    This rule is also implemented in AuCaM's `campaigns/asd_campaign/acquisition.py` over a
-    different record type. Two implementations of one rule is a known duplication and is
-    tracked; the rule is short and its failure is silent, so neither side guesses.
+    **The arithmetic is `asteer.grouping.holdout_indices` and no longer lives here** (item 50,
+    episode J20). It was implemented twice -- here over corpus rows and in AuCaM's
+    `campaigns/asd_campaign/acquisition.py` over `Candidate` objects -- and one rule in two
+    repos whose failure is *silent* is the duplication worth removing first. Both copies were
+    run against the shared implementation over every cluster-size composition of up to 12
+    designs at eight fractions and agreed everywhere, so the move changed no split
+    (`asteer/tests/test_grouping.py`).
+
+    What stays here is the shape of the refusal: this function *returns* `([], [])`, because
+    its caller turns that into `INSUFFICIENT_EVIDENCE` in a manifest, where AuCaM's copy lets
+    the same condition raise at a batch it is about to spend ATM hours on.
+
+    The import is function-local because this module owns torch and its driver must import
+    nothing heavy (CON-4); `asteer` is stdlib-only, and this keeps every asteer import in this
+    file the same shape.
     """
-    if any(not e.get("group") for e in examples):
+    from asteer.grouping import Ungrouped, holdout_indices  # noqa: PLC0415
+
+    try:
+        train_at, holdout_at = holdout_indices([e.get("group") for e in examples], fraction)
+    except Ungrouped:
         return [], []
-    clusters: Dict[str, List[Dict[str, Any]]] = {}
-    for example in examples:
-        clusters.setdefault(str(example["group"]), []).append(example)
-    target = len(examples) * fraction
-    holdout: List[Dict[str, Any]] = []
-    for name in sorted(clusters, key=lambda k: (-len(clusters[k]), k)):
-        if len(holdout) + len(clusters[name]) > target and holdout:
-            continue
-        holdout.extend(clusters[name])
-        if len(holdout) >= target:
-            break
-    held = {id(e) for e in holdout}
-    train = [e for e in examples if id(e) not in held]
+    train = [examples[i] for i in train_at]
+    holdout = [examples[i] for i in holdout_at]
     if not train or not holdout:
         return [], []
     return train, holdout

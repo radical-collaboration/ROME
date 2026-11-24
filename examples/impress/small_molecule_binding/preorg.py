@@ -61,8 +61,13 @@ DERIVED_PROPERTY = "induced_fit_risk"
 
 #: Where a record carries its feature vector and its scaffold cluster. Both live under the
 #: `LabelRecord.metadata` dict rather than in the contract, because the embedding comes from a
-#: co-folding model and the cluster from impress-a's planner -- neither is a property of the
-#: measurement, which is what `LabelRecord` is.
+#: co-folding model and the cluster from impress-a's campaign pass -- neither is a property of
+#: the measurement, which is what `LabelRecord` is.
+#:
+#: **Both strings mirror `asteer`'s**, which is the side that writes them
+#: (`features.EMBEDDING_KEY`, `grouping.SCAFFOLD_KEY`), and a test asserts they agree -- the
+#: same shape `TRAIN_COMPLETE_MARKER` has, and for the same reason: this driver must import
+#: nothing heavy at module scope (CON-4), so it cannot import the writer's constant.
 FEATURE_KEY = "embedding"
 GROUP_KEY = "scaffold"
 
@@ -272,9 +277,14 @@ def _group_of(record: Dict[str, Any], key: str) -> Optional[str]:
     """The scaffold cluster, or `None` -- never a stand-in.
 
     `LabelRecord` has no scaffold field: the cluster is a property of the design, which lives
-    in impress-a's tree, so it can only arrive through `metadata`. When it does not, this
-    returns `None` and the round reports **insufficient evidence** rather than inventing a
-    grouping. Treating every ungrouped record as one cluster puts them all on one side of the
+    in impress-a's tree, so it can only arrive through `metadata`. **Since J20 something puts
+    it there** -- `impress_a.core.scaffolds.assign_scaffolds` clusters the campaign's designs
+    and `MeasurementBridge` copies the result onto each label, beside the sequence it was
+    computed from. Until then nothing did, so this returned `None` for every record ever
+    written and every round reported insufficient evidence (item 71).
+
+    When it is still absent -- a campaign whose pass has not run -- this returns `None` and
+    the round reports **insufficient evidence** rather than inventing a grouping. Treating every ungrouped record as one cluster puts them all on one side of the
     boundary; treating each as its own makes a random split wearing a cluster's name, which is
     the single most common way a surrogate's reported accuracy is wrong and is invisible in
     the numbers.
