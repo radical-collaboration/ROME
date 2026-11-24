@@ -303,17 +303,53 @@ def resource_policy(backend: Any, *, mode: str = "node") -> Tuple[Any, str]:
 # ── what each stream is handed, and what two of them refuse ───────────────────
 
 
+def _sibling(name: str) -> Any:
+    """Import a module that sits beside this file, **by path when a bare import cannot**.
+
+    `from preorg_train_wrapper import preorg_predictor` resolves only when this directory is
+    on `sys.path` -- true when this file runs as a script under `dragon -s`, false when it is
+    imported as `examples.impress.small_molecule_binding.run_asd_surrogates_rome`, which is
+    how every test and every package consumer reaches it.
+
+    **That is J8's defect, found again by J8's method.** There, `preorg_predictor` carried
+    `from streams import MODEL_B` and nothing had ever called the function, so nothing had
+    found it. Here the same shape sat in `preorg_build`, and writing a test that actually
+    calls Model C's new envelope is what surfaced it -- so both builds now go through this.
+
+    The plain import is tried first, so a module already imported under its own name is reused
+    rather than loaded twice under two identities: two copies of a wrapper means two
+    `RESIDUAL_NAME` constants and two `Residual` classes that fail `isinstance`.
+    """
+    import importlib  # noqa: PLC0415
+    import importlib.util  # noqa: PLC0415
+
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError:
+        pass
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:  # pragma: no cover -- a missing sibling file
+        raise ModuleNotFoundError(
+            f"{name} is neither importable nor beside {__file__}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    # Registered before execution, so a wrapper that imports its own name resolves to the
+    # module being built rather than starting a second copy of it.
+    sys.modules.setdefault(name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
 def preorg_build(version_dir: str, manifest: Any = None) -> streams.Predict:
     """Model B: the featuriser and the ensemble, both from the wrapper.
 
-    Imported inside the call, not at module scope, because the wrapper owns torch (CON-4) and
+    Resolved inside the call, not at module scope, because the wrapper owns torch (CON-4) and
     this module is constructed in the driver process. The wrapper's own heavy imports are
     function-local too, so this would be safe either way -- it is written this way so that
     staying safe does not depend on the wrapper staying disciplined.
     """
-    from preorg_train_wrapper import preorg_predictor  # noqa: PLC0415
-
-    return preorg_predictor(version_dir, manifest)
+    return _sibling("preorg_train_wrapper").preorg_predictor(version_dir, manifest)
 
 
 def _no_envelope(model_id: str, what: str) -> None:
@@ -337,13 +373,19 @@ def anchor_build(version_dir: str, manifest: Any = None) -> streams.Predict:
 
 
 def affdelta_build(version_dir: str, manifest: Any = None) -> streams.Predict:
-    """Model C: refuses, by name. See :func:`_no_envelope`."""
-    _no_envelope(streams.MODEL_C, (
-        "C's GP lives on the residual's PCA basis and predicts a *correction*, so serving "
-        "`dg_corrected` means composing `Residual.predict(project(x))` with the posterior "
-        "and reading the residual artifact at load time -- a composition, not an adapter"
-    ))
-    raise AssertionError("unreachable")  # pragma: no cover
+    """Model C: the residual, the basis and the posterior, composed (J11).
+
+    **This refused until J11**, and the refusal was accurate rather than lazy: C's GP lives on
+    the residual's own PCA basis and predicts a *correction*, so serving `dg_corrected` means
+    reading the residual artifact at load time and composing
+    `Residual.predict(project(x))` with the posterior -- a composition, not an adapter. The
+    composition now exists in the wrapper, which is where the arithmetic and torch belong.
+
+    Resolved inside the call for the same reason `preorg_build` does it: the wrapper owns
+    torch (CON-4) and this module is constructed in the driver process. Through `_sibling`,
+    because a bare import of a sibling is J8's defect -- see that function.
+    """
+    return _sibling("affdelta_train_wrapper").affdelta_predictor(version_dir, manifest)
 
 
 # ── one model's half of the loop ──────────────────────────────────────────────

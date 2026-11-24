@@ -248,14 +248,36 @@ def test_the_property_each_trainer_filters_on_is_the_one_the_label_store_writes(
 
 @pytest.mark.parametrize("build, model_id", [
     (runner.anchor_build, streams.MODEL_A),
-    (runner.affdelta_build, streams.MODEL_C),
 ])
 def test_a_surrogate_with_no_serving_envelope_refuses_instead_of_guessing(build, model_id,
                                                                          tmp_path):
+    """**Model A only, since J11 gave Model C its envelope.**
+
+    A's refusal is permanent and J18 records why: its head is a scorer over bags of atoms
+    whose output is comparable within a group only, so a single request's score is not a
+    quantity, and it reports no sigma -- which `acquisition.rank` refuses a candidate for
+    lacking. C's refusal was never permanent, only unimplemented: it named the composition it
+    needed, and `affdelta_predictor` is that composition.
+    """
     with pytest.raises(NotImplementedError) as caught:
         build(str(tmp_path))
     assert model_id in str(caught.value)
     assert "RESIDENT_FROM" in str(caught.value)
+
+
+def test_model_c_now_has_an_envelope_and_refuses_an_empty_version_by_name():
+    """The refusal it does keep is about the *artifact*, not about the composition.
+
+    `affdelta_build` no longer raises `NotImplementedError`; it loads, and a version
+    directory with no weights or no residual is refused for that, by name.
+    """
+    import pytest as _pytest
+
+    with _pytest.raises((FileNotFoundError, ValueError)) as caught:
+        runner.affdelta_build("/nonexistent/version/dir")
+    assert "RESIDENT_FROM" not in str(caught.value), (
+        "C's envelope exists; a missing artifact is not a missing envelope"
+    )
 
 
 def test_the_refusal_reaches_the_client_as_an_outage_not_a_score(tmp_path):

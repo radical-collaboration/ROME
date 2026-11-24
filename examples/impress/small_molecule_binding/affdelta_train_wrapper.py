@@ -35,7 +35,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 TRAIN_COMPLETE_MARKER = "train_complete"
 
 __all__ = ["run_round", "main", "Residual", "evaluate", "botorch_gp", "GP", "load_state",
-           "STATE_NAME", "RESIDUAL_NAME", "TRAIN_COMPLETE_MARKER"]
+           "STATE_NAME", "RESIDUAL_NAME", "TRAIN_COMPLETE_MARKER",
+           "affdelta_predictor"]
 
 #: This version's weights and the prior they correct, both inside the version directory.
 #: The residual is **copied** rather than referenced: a path recorded in a manifest can be
@@ -48,6 +49,35 @@ Fitter = Callable[[List[Dict[str, Any]], Dict[str, Any]], Posterior]
 
 
 # -- the thing that is read, not fitted --------------------------------------
+
+
+def _featuriser_for(job: Dict[str, Any]) -> Any:
+    """The `Featuriser` this model's vectors come from, or `None` when it has none declared.
+
+    Resolved by model id rather than by name, so the day Model C's featuriser changes this
+    follows without being edited -- the same reason `preorg_predictor` asks the registry
+    instead of importing a constant.
+    """
+    from asteer.features import UnknownFeaturiser, featuriser_for_model  # noqa: PLC0415
+
+    try:
+        return featuriser_for_model(str(job.get("model_id") or ""))
+    except (UnknownFeaturiser, KeyError):
+        return None
+
+
+def _required(data: Dict[str, Any], key: str, version: int) -> Any:
+    """A residual field with no default, because a default here is a silent wrong answer."""
+    value = data.get(key)
+    if value in (None, "", [], ()):
+        raise ValueError(
+            f"residual v{version} carries no {key!r}. Written before J11, which gave the "
+            f"artifact the four fields that make it checkable -- `features`, `featuriser`, "
+            f"`target` and `units`. Re-export it: a residual that cannot say what its columns "
+            "are, what produced them, what it predicts or in what units is one nothing can "
+            "check, and item 74 is what that costs"
+        )
+    return value
 
 
 class Residual:
@@ -65,11 +95,31 @@ class Residual:
         self.coef = [float(v) for v in data["coef"]]
         self.intercept = float(data["intercept"])
         self.notes = str(data.get("notes", ""))
+        # -- J11's four fields. Required, not optional, for the reason `preorg_predictor`
+        # gives about an ensemble that does not name its featuriser: a check that can be
+        # skipped is a check that will be, and nothing is lost by requiring them because no
+        # real residual exists yet (J14 fits the first one).
+        self.features = tuple(str(c) for c in _required(data, "features", self.version))
+        self.featuriser = str(_required(data, "featuriser", self.version))
+        self.target = str(_required(data, "target", self.version))
+        self.units = str(_required(data, "units", self.version))
         if len(self.components) != len(self.coef):
             raise ValueError(
                 f"residual v{self.version}: {len(self.components)} components but "
                 f"{len(self.coef)} coefficients -- the basis and the prior disagree, which "
                 "would project into one space and predict in another"
+            )
+        if len(self.features) != len(self.centre):
+            raise ValueError(
+                f"residual v{self.version} names {len(self.features)} features and was "
+                f"fitted on {len(self.centre)}-dim embeddings. The names are what make the "
+                "projection checkable, so a residual whose names and basis disagree is worse "
+                "than one with no names at all"
+            )
+        if len(set(self.features)) != len(self.features):
+            raise ValueError(
+                f"residual v{self.version} names a column twice: {sorted(self.features)}. "
+                "Two columns under one name cannot both be checked"
             )
 
     @classmethod
@@ -77,8 +127,46 @@ class Residual:
         with open(path) as fh:
             return cls(json.load(fh))
 
-    def project(self, x: Sequence[float]) -> List[float]:
-        """Into the residual's own basis. Never re-fitted here; see the module docstring."""
+    def project(self, x: Sequence[float], *, featuriser: str = "",
+                columns: Optional[Sequence[str]] = None) -> List[float]:
+        """Into the residual's own basis, **name-checked**. Never re-fitted here.
+
+        Item 74 was that this checked only a width, so a correctly-sized vector in the wrong
+        order projected without complaint and predicted nonsense -- ten columns give ten
+        factorial ways to be wrong and exactly one to be right.
+
+        **The order of the three checks is the point**, and it runs from cause to symptom:
+
+        1. the **featuriser**, so a vector from `standin-1` is refused as *the wrong
+           featuriser* rather than as `2 != 10`. The arithmetic is a consequence; the stand-in
+           is the cause, and a refusal that names the width sends a reader to look at a basis
+           that is perfectly fine;
+        2. the **columns**, in order, so a permutation is refused by the name of the first
+           column that moved;
+        3. the **width**, which by then can only be a residual whose own fields disagree.
+
+        Both names are optional *arguments* and neither is optional on the artifact: a caller
+        that knows what produced its vector should say so, and one that does not gets the
+        width check it always had.
+        """
+        if featuriser and featuriser != self.featuriser:
+            raise ValueError(
+                f"residual v{self.version} was fitted on vectors from {self.featuriser!r} and "
+                f"this one came from {featuriser!r}. The widths may even agree; the columns "
+                "mean different things, and the projection would be arithmetic over numbers "
+                "that have nothing to do with the basis"
+            )
+        if columns is not None:
+            given = tuple(str(c) for c in columns)
+            if given != self.features:
+                moved = next((i for i, (a, b) in enumerate(zip(given, self.features))
+                              if a != b), min(len(given), len(self.features)))
+                raise ValueError(
+                    f"residual v{self.version} names its columns "
+                    f"{list(self.features)} and was given {list(given)}; they first differ at "
+                    f"position {moved}. A correctly-sized vector in the wrong order projects "
+                    "without complaint and predicts nonsense, which is item 74"
+                )
         if len(x) != len(self.centre):
             raise ValueError(
                 f"residual v{self.version} was fitted on {len(self.centre)}-dim embeddings "
@@ -86,6 +174,23 @@ class Residual:
             )
         centred = [(float(v) - c) / s for v, c, s in zip(x, self.centre, self.scale)]
         return [sum(w * z for w, z in zip(row, centred)) for row in self.components]
+
+    def require_target(self, property_name: str, *, where: str = "") -> None:
+        """Refuse a residual fitted on one quantity and served under another's name.
+
+        The third of the promotion gate's three refusals, enforced where the artifact is
+        loaded rather than where the number is published -- because by publication time the
+        number is finite, plausible and wrong. A residual fitted on `interaction_energy` and
+        served as `dg_corrected` would hand a client a Rosetta score under the name of a free
+        energy.
+        """
+        if self.target != property_name:
+            raise ValueError(
+                f"{where or 'residual'} v{self.version} was fitted on target "
+                f"{self.target!r} and is being used for {property_name!r}. A correction to "
+                "one quantity is not a correction to another, and the served number would be "
+                "finite, plausible and about something else"
+            )
 
     def predict(self, z: Sequence[float]) -> float:
         return self.intercept + sum(c * v for c, v in zip(self.coef, z))
@@ -158,6 +263,71 @@ def load_state(version_dir: str, manifest: Any = None) -> GP:
     model.load_state_dict(state["state_dict"])
     model.eval()
     return GP(model, state["x"], state["y"], state["yvar"])
+
+
+def affdelta_predictor(version_dir: str, manifest: Any = None):
+    """The `build` Model C's stream is handed: a version directory in, `features -> values` out.
+
+    **The first thing Model C has ever been able to do.** `affdelta_build` raised
+    `AssertionError("unreachable")` under a docstring describing this composition, which is
+    item 52's serving half for C and why item 9 read *"cannot serve anything real"*.
+
+    **It is a composition, not an adapter**, and that is the whole reason it could not be the
+    one-liner Model B's is. C's GP does not predict `dg_corrected`; it predicts the *residual*
+    of a prior that lives in its own artifact, on a basis that also lives there. So serving one
+    number means reading the residual, projecting into its basis, predicting the correction,
+    and adding the prior back:
+
+        dg_corrected = residual.predict(z) + posterior_mean(z),  z = residual.project(x)
+
+    The sigma is the **posterior's alone**. The prior is fixed -- fitted offline, read and never
+    rewritten -- so it contributes no uncertainty to add in quadrature, and inventing one for
+    it would be inventing the number acquisition refuses a candidate for lacking.
+
+    Four refusals at load, every one of them by name, and all four about the same mistake in
+    different clothes: serving a number that means something other than its key says.
+    """
+    from asteer.features import embed, featuriser_for_model  # noqa: PLC0415
+
+    gp = load_state(version_dir, manifest)
+
+    model_id = getattr(manifest, "model_id", "") or os.path.basename(
+        os.path.dirname(os.path.abspath(version_dir))
+    )
+    featuriser = featuriser_for_model(model_id)
+
+    residual_path = os.path.join(version_dir, RESIDUAL_NAME)
+    if not os.path.exists(residual_path):
+        raise ValueError(
+            f"{version_dir} holds weights and no {RESIDUAL_NAME}. C's posterior is a "
+            "correction to a prior, so without the prior the number it serves is a residual "
+            "wearing the name of a free energy. `run_round` copies the artifact in beside the "
+            "weights; a version missing it was published before it did"
+        )
+    residual = Residual.load(residual_path)
+
+    prop = str(getattr(manifest, "trained_on", "") or "")
+    if not prop:
+        raise ValueError(
+            f"{version_dir} holds a manifest that does not say what property it fitted, so "
+            "serving it would mean choosing a key for it here -- which is the defect J8 "
+            "removed on Model B's side. Refit the round."
+        )
+    residual.require_target(prop, where=residual_path)
+    if getattr(manifest, "featuriser", None) not in (None, featuriser.name):
+        raise ValueError(
+            f"{version_dir} was fitted with featuriser {manifest.featuriser!r} and "
+            f"{model_id} now embeds with {featuriser.name!r}. Serving it would feed the GP "
+            "inputs it has never seen, and the arithmetic would not complain."
+        )
+
+    def predict(features):
+        x = embed(features, featuriser=featuriser)
+        z = residual.project(x, featuriser=featuriser.name, columns=featuriser.columns)
+        (correction,), (sigma,) = gp([z])
+        return {prop: residual.predict(z) + correction}, {prop: sigma}
+
+    return predict
 
 
 def botorch_gp(train: List[Dict[str, Any]], job: Dict[str, Any]) -> GP:
@@ -327,10 +497,17 @@ def run_round(job: Dict[str, Any], *, fit: Optional[Fitter] = None) -> str:
     output_dir = job["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
     residual = Residual.load(job["residual_path"])
+    # Both names, checked once here rather than per example: the target against the property
+    # this round is fitting, and the featuriser against the one the model's corpus rows came
+    # from. Either mismatch would otherwise produce a round that completes, publishes, and is
+    # wrong about what it predicted.
+    residual.require_target(job["property_name"], where=job["residual_path"])
+    featuriser = _featuriser_for(job)
 
     examples = []
     for example in job["examples"]:
-        z = residual.project(example["x"])
+        z = residual.project(example["x"], featuriser=featuriser.name if featuriser else "",
+                             columns=featuriser.columns if featuriser else None)
         examples.append({**example, "z": z,
                          "residual": example["y"] - residual.predict(z)})
     fitter = fit or botorch_gp

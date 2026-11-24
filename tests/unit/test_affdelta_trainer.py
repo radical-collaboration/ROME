@@ -32,14 +32,42 @@ from examples.impress.small_molecule_binding.affdelta_train_wrapper import (  # 
     run_round,
 )
 
-#: The offline prior: a 4-dim embedding reduced to 2, with a linear residual on top.
+#: Model C's columns, from the registry rather than written out here -- the same discipline
+#: J9 applied to Model B's fixtures. The residual's basis and these fixtures' vectors are both
+#: this wide, so a change to the featuriser moves them together instead of leaving the corpus
+#: and the artifact to disagree in a way only `project` would notice.
+def _columns():
+    from asteer.features import featuriser_for_model
+
+    return list(featuriser_for_model("aff_delta").columns)
+
+
+COLUMNS = _columns()
+WIDTH = len(COLUMNS)
+
+
+def _basis(n: int) -> list:
+    """`n` unit vectors over `WIDTH` dimensions: the first two columns, kept as they are."""
+    return [[1.0 if i == k else 0.0 for i in range(WIDTH)] for k in range(n)]
+
+
+#: The offline prior: Model C's embedding reduced to 2, with a linear residual on top. The
+#: arithmetic is unchanged from before J11 -- the prior is `-8 + x0` and the basis keeps the
+#: first two columns -- and what J11 added is the four fields that make the artifact checkable:
+#: `features` (so a permutation is refused by name, item 74), `featuriser` (so a `standin-1`
+#: vector is refused as the wrong featuriser rather than as a width), `target` (so a residual
+#: fitted on one quantity is never served under another's name) and `units`.
 RESIDUAL = {
     "version": 3,
-    "components": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-    "centre": [0.0, 0.0, 0.0, 0.0],
-    "scale": [1.0, 1.0, 1.0, 1.0],
+    "components": _basis(2),
+    "centre": [0.0] * WIDTH,
+    "scale": [1.0] * WIDTH,
     "coef": [1.0, 0.0],
     "intercept": -8.0,
+    "features": COLUMNS,
+    "featuriser": "chain-metrics-1",
+    "target": "dg_corrected",
+    "units": "kcal/mol",
     "notes": "fitted offline on public affinity data",
 }
 
@@ -56,7 +84,7 @@ def _row(n: int, x0: float, *, group: str | None = None, sigma: float | None = 0
     # PROPERTY a measurement supersedes, and this trainer filters on `property_name`. These
     # fixtures wrote the metric name, which is exactly why the defect survived every test
     # here: the corpus and the filter were wrong together.
-    metadata: dict = {"embedding": [x0, 0.5, 0.0, 0.0]}
+    metadata: dict = {"embedding": [x0, 0.5] + [0.0] * (WIDTH - 2)}
     if group:
         metadata["scaffold"] = group
     return {
@@ -523,3 +551,152 @@ def test_the_manifest_carries_what_the_gate_reads(tmp_path):
     assert decision.rule != "target_unnamed"
     assert decision.rule != "featuriser_unnamed"
     assert decision.rule != "holdout_groups_unknown"
+
+
+# -- J11: a residual that knows its own columns, and a C that can serve ------
+
+
+def _residual_variant(tmp_path, **over):
+    path = tmp_path / "residual_variant.json"
+    path.write_text(json.dumps({**RESIDUAL, **over}, indent=2))
+    return str(path)
+
+
+def test_a_residual_missing_any_of_the_four_new_fields_is_refused_by_name(tmp_path):
+    """Required, not optional, for the reason `preorg_predictor` gives about an ensemble that
+    does not name its featuriser: a check that can be skipped is a check that will be.
+
+    Nothing is lost by requiring them -- no real residual exists yet, J14 fits the first.
+    """
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import Residual
+
+    for field in ("features", "featuriser", "target", "units"):
+        data = {k: v for k, v in RESIDUAL.items() if k != field}
+        with pytest.raises(ValueError, match=field):
+            Residual(data)
+        assert "J11" in _message(Residual, data), "the refusal must say how to fix it"
+
+
+def _message(cls, data):
+    try:
+        cls(data)
+    except ValueError as exc:
+        return str(exc)
+    raise AssertionError("expected a refusal")
+
+
+def test_a_permuted_vector_is_refused_by_the_name_of_the_column_that_moved(tmp_path):
+    """**Item 74.** Ten columns give ten factorial ways to be wrong and one to be right, and
+    `project` used to check only a width -- so a correctly-sized vector in the wrong order
+    projected without complaint and predicted nonsense."""
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import Residual
+
+    residual = Residual(RESIDUAL)
+    swapped = [COLUMNS[1], COLUMNS[0], *COLUMNS[2:]]
+    with pytest.raises(ValueError) as caught:
+        residual.project([0.0] * WIDTH, featuriser="chain-metrics-1", columns=swapped)
+    message = str(caught.value)
+    assert COLUMNS[0] in message and COLUMNS[1] in message
+    assert "position 0" in message
+    # And the right order still projects.
+    assert residual.project([1.0, 0.5] + [0.0] * (WIDTH - 2),
+                            featuriser="chain-metrics-1", columns=COLUMNS) == [1.0, 0.5]
+
+
+def test_a_standin_vector_is_refused_as_the_wrong_featuriser_and_not_as_a_width():
+    """The refusal names the **cause**, not the symptom.
+
+    A width refusal would send a reader to look at a basis that is perfectly fine. The
+    stand-in is what is wrong, and it is what produced Model B's logo_r2 of -0.19 on job
+    24414064.
+    """
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import Residual
+
+    residual = Residual(RESIDUAL)
+    with pytest.raises(ValueError) as caught:
+        residual.project([0.37, 0.52], featuriser="standin-1")
+    message = str(caught.value)
+    assert "standin-1" in message and "chain-metrics-1" in message
+    assert "dim embeddings" not in message, (
+        "the width refusal must not fire first: it sends a reader to look at a basis that is "
+        f"perfectly fine. Got: {message}"
+    )
+
+
+def test_a_residual_fitted_on_another_target_refuses_against_this_property(tmp_path):
+    """A residual fitted on `interaction_energy` would hand a client a Rosetta score under
+    the name of a free energy -- finite, plausible, and about something else."""
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import Residual
+
+    residual = Residual({**RESIDUAL, "target": "interaction_energy"})
+    with pytest.raises(ValueError, match="interaction_energy"):
+        residual.require_target("dg_corrected")
+    residual.require_target("interaction_energy")  # its own target is fine
+
+
+def test_a_round_refuses_a_residual_whose_target_is_not_the_property_it_fits(tmp_path):
+    """Checked once in `run_round`, before any example is projected."""
+    job = _job(tmp_path, _corpus())
+    job["residual_path"] = _residual_variant(tmp_path, target="interaction_energy")
+    with pytest.raises(ValueError, match="fitted on target"):
+        run_round(job)
+
+
+def test_model_c_serves_a_mean_and_a_sigma_for_the_first_time(tmp_path):
+    """**The first time Model C serves anything.**
+
+    `affdelta_build` raised `AssertionError("unreachable")` under a docstring describing this
+    composition. The number is the prior plus the correction, on the residual's own basis:
+
+        dg_corrected = residual.predict(z) + posterior_mean(z),  z = residual.project(x)
+
+    and the sigma is the posterior's alone, because the prior is fixed and contributes no
+    uncertainty to add in quadrature.
+    """
+    pytest.importorskip("botorch", reason="botorch is the wrapper's dependency")
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import (
+        Residual,
+        affdelta_predictor,
+        load_state,
+    )
+    from asteer.registry import ModelRegistry
+
+    job = _job(tmp_path, _corpus())
+    run_round(job)
+    registry = ModelRegistry(job["registry_root"])
+    manifest = registry.read_manifest("aff_delta", 0)
+    version_dir = registry.version_dir("aff_delta", 0)
+
+    predict = affdelta_predictor(version_dir, manifest)
+    x = [1.0, 0.5] + [0.0] * (WIDTH - 2)
+    values, sigmas = predict({"embedding": list(x)})
+
+    assert list(values) == ["dg_corrected"] and list(sigmas) == ["dg_corrected"]
+    assert sigmas["dg_corrected"] > 0.0, "acquisition refuses a candidate with no sigma"
+
+    # The composition, re-derived here rather than restated: prior plus correction.
+    residual = Residual.load(os.path.join(version_dir, "residual.json"))
+    z = residual.project(x, featuriser="chain-metrics-1", columns=COLUMNS)
+    (correction,), (sigma,) = load_state(version_dir)([z])
+    assert values["dg_corrected"] == pytest.approx(residual.predict(z) + correction)
+    assert sigmas["dg_corrected"] == pytest.approx(sigma)
+    # And it is NOT the bare posterior: the prior is -8 + x0, so the two differ by about that.
+    assert abs(values["dg_corrected"] - correction) > 1.0
+
+
+def test_the_envelope_refuses_a_version_whose_residual_was_not_copied_in(tmp_path):
+    """Weights without the prior would serve a residual wearing the name of a free energy."""
+    pytest.importorskip("botorch", reason="botorch is the wrapper's dependency")
+    from examples.impress.small_molecule_binding.affdelta_train_wrapper import (
+        RESIDUAL_NAME,
+        affdelta_predictor,
+    )
+    from asteer.registry import ModelRegistry
+
+    job = _job(tmp_path, _corpus())
+    run_round(job)
+    registry = ModelRegistry(job["registry_root"])
+    version_dir = registry.version_dir("aff_delta", 0)
+    os.remove(os.path.join(version_dir, RESIDUAL_NAME))
+    with pytest.raises(ValueError, match="correction to a prior"):
+        affdelta_predictor(version_dir, registry.read_manifest("aff_delta", 0))
