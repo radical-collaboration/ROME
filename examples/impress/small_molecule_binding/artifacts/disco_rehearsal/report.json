@@ -14,19 +14,24 @@
   },
   "episode": "J14",
   "evaluate": {
-    "calibration": 1.6899075970843414,
+    "calibration": 1.760291213636798,
+    "calibration_loo": 1.6899075970843414,
+    "calibration_worst_group": 17.75279695538854,
     "holdout_n": 330,
     "logo_r2": -0.11140394898401773,
     "loo_r2": -0.12824770109345063,
     "n_holdout_groups": 33,
     "n_labels": 330,
-    "nll": 1.0528617230874406,
+    "nll": 1.0973531149079891,
+    "nll_loo": 1.0528617230874406,
     "reason": "",
     "residual_version": 1,
-    "sigma_dg_mean": 0.5011170929278574,
-    "validated": true
+    "sigma_dg_mean": 0.5071711944511113,
+    "sigma_dg_mean_loo": 0.5011170929278574,
+    "validated": true,
+    "worst_group": "M0663_1rk2"
   },
-  "evaluate_seconds": 262.2531349658966,
+  "evaluate_seconds": 262.50794100761414,
   "feature_verdicts": [
     {
       "column": "aggregate_score",
@@ -3476,7 +3481,7 @@
     "rmse_out_of_family": 0.6112347276540224,
     "rmse_predict_mean": 0.6253885362483235
   },
-  "seconds": 544.3713583946228,
+  "seconds": 317.7099983692169,
   "target": "log_motif_rmsd",
   "units": "ln(angstrom)"
 }

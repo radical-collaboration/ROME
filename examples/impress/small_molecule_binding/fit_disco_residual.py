@@ -709,14 +709,18 @@ def run(data_dir: str, island_counts: str, out_dir: str, *, corpus_csv: str = ""
         metrics = evaluate(list(examples), job, residual, botorch_gp)
         report["evaluate"] = metrics
         report["evaluate_seconds"] = time.time() - loo_started
-        if metrics["logo_r2"] is not None and table["r2"] is not None:
-            drift = abs(metrics["logo_r2"] - table["r2"])
+        # Both grouped numbers, since J15: `evaluate` now keeps the sigma its grouped fold
+        # computes, so its calibration is comparable to this table's as well as its r2.
+        for mine, theirs in (("r2", "logo_r2"), ("calibration", "calibration")):
+            if metrics[theirs] is None or table[mine] is None:
+                continue
+            drift = abs(metrics[theirs] - table[mine])
             if drift > 1e-9:
                 raise ValueError(
-                    f"this module's fold table and evaluate's logo_r2 disagree by {drift:.2e} "
-                    f"({table['r2']} against {metrics['logo_r2']}). They are the same split "
-                    "over the same examples, so a disagreement is two split rules -- item 50's "
-                    "shape, which this project has already paid for once")
+                    f"this module's fold table and evaluate's {theirs} disagree by "
+                    f"{drift:.2e} ({table[mine]} against {metrics[theirs]}). They are the "
+                    "same split over the same examples, so a disagreement is two split "
+                    "rules -- item 50's shape, which this project has already paid for once")
     report["gate"] = gate_verdict(table, report.get("evaluate"), len(examples))
     report["seconds"] = time.time() - started
     with open(os.path.join(out_dir, "report.json"), "w") as fh:

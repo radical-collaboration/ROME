@@ -410,11 +410,36 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], residual: Resi
     `preorg_train_wrapper.evaluate` already used for Model B, and is **`None` with a reason**
     when the groups cannot support one -- which the gate reads as `INSUFFICIENT_EVIDENCE`
     rather than as a pass.
+
+    **J15 found the same defect one key over, and this is the fix.** `nll` and `calibration`
+    were the leave-one-OUT numbers too, published beside a grouped `logo_r2` into a manifest
+    whose `calibration` field Model B fills from a real held-out cluster
+    (`preorg_train_wrapper.py:200-203`). One key, two meanings, and the gate reading both as
+    evidence about the same question. So the grouped fold below now keeps the sigma it used to
+    throw away, and `nll`, `calibration`, `sigma_dg_mean` and `holdout_n` all describe **that**
+    fold. The leave-one-out numbers keep every one of their values under a `_loo` name.
+
+    **The worst single group rides beside the pooled calibration**, named. J14's rehearsal is
+    why: over 33 held-out targets the pooled calibration is 1.76 and inside the gate's
+    [0.1, 5.0] band while one group of two folds reads **17.7**. A pooled z-score hides a
+    subgroup that is catastrophically overconfident, and for Model C the sigma is the product
+    -- `acquisition.rank` refuses a candidate that has none. There is deliberately no bar on
+    it here: a bar belongs to `PromotionBars`, which is every model's business and not this
+    round's.
     """
     report: Dict[str, Any] = {
-        "nll": None, "calibration": None, "loo_r2": None, "logo_r2": None,
-        "n_holdout_groups": None, "holdout_n": 0,
-        "sigma_dg_mean": None, "n_labels": len(examples),
+        # The grouped trio plus its count. Every one of these describes the leave-one-GROUP-out
+        # fold, which is the experiment `logo_r2` beside them describes and the one the gate
+        # judges. `holdout_n` counts the points that fold held out, as Model B's does.
+        "nll": None, "calibration": None, "sigma_dg_mean": None, "holdout_n": 0,
+        "logo_r2": None, "n_holdout_groups": None,
+        # The same three from the leave-one-out refits, under names that say so (J15). Nothing
+        # this round can compute is dropped; it is only stopped from wearing the other one's
+        # name.
+        "nll_loo": None, "calibration_loo": None, "sigma_dg_mean_loo": None, "loo_r2": None,
+        # Reported, not barred: the fold whose sigma is furthest from honest, and its group.
+        "calibration_worst_group": None, "worst_group": "",
+        "n_labels": len(examples),
         "residual_version": residual.version, "validated": False, "reason": "",
     }
     if len(examples) < int(job["min_labels"]):
@@ -434,15 +459,14 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], residual: Resi
         means.append(mean[0])
         sigmas.append(sigma[0])
         truths.append(examples[i]["residual"])
-    report["nll"] = _nll(truths, means, sigmas)
-    report["calibration"] = _calibration(truths, means, sigmas)
-    report["holdout_n"] = len(truths)
-    report["sigma_dg_mean"] = sum(sigmas) / len(sigmas)
-    report["validated"] = True
-
-    # Leave-one-OUT, named as such. It is what the n refits above already computed, and it is
-    # a real number worth reporting -- it just is not a grouped one.
+    # Leave-one-OUT, every number named as such (J15). These are what the n refits above
+    # computed and they are real numbers worth reporting -- they are simply not grouped ones,
+    # and until J15 three of them were published under the grouped names.
+    report["nll_loo"] = _nll(truths, means, sigmas)
+    report["calibration_loo"] = _calibration(truths, means, sigmas)
+    report["sigma_dg_mean_loo"] = sum(sigmas) / len(sigmas)
     report["loo_r2"] = _r2(truths, means)
+    report["validated"] = True
 
     # Leave-one-GROUP-out: one refit per group, each predicting only the group it held out.
     # Ungrouped records are excluded rather than pooled into a nameless group, for the reason
@@ -454,28 +478,46 @@ def evaluate(examples: List[Dict[str, Any]], job: Dict[str, Any], residual: Resi
         report["reason"] = (
             f"{len(groups)} scaffold clusters among {len(grouped)} grouped labels: a "
             "leave-one-group-out estimate needs at least three, and is near-meaningless "
-            "below about four. loo_r2, nll and calibration are reported; logo_r2 is not "
-            "invented."
+            "below about four. The leave-one-out numbers are reported under their own names; "
+            "logo_r2, and with it the grouped nll and calibration, are not invented."
         )
         return report
 
     pooled_truth: List[float] = []
     pooled_pred: List[float] = []
+    pooled_sigma: List[float] = []
+    worst: Tuple[float, str] = (-1.0, "")
     for held in groups:
         inner_train = [e for e in grouped if str(e["group"]) != held]
         inner_test = [e for e in grouped if str(e["group"]) == held]
         if len(inner_train) < 2 or not inner_test:
             continue
-        inner_mean, _ = fit(inner_train, job)([e["z"] for e in inner_test])
+        # **The sigma is kept.** Throwing it away here is what left the gate reading a
+        # leave-one-out calibration beside a grouped r2 (J15).
+        inner_mean, inner_sigma = fit(inner_train, job)([e["z"] for e in inner_test])
+        inner_truth = [e["residual"] for e in inner_test]
         pooled_pred.extend(inner_mean)
-        pooled_truth.extend(e["residual"] for e in inner_test)
+        pooled_sigma.extend(inner_sigma)
+        pooled_truth.extend(inner_truth)
+        fold = _calibration(inner_truth, inner_mean, inner_sigma)
+        if fold > worst[0]:
+            worst = (fold, held)
+    if pooled_truth:
+        # What the grouped fold measured, reported whenever it produced a point. These need
+        # held-out predictions and nothing else -- unlike `r2` below, which also needs the
+        # held-out truth to have some variance to explain.
+        report["nll"] = _nll(pooled_truth, pooled_pred, pooled_sigma)
+        report["calibration"] = _calibration(pooled_truth, pooled_pred, pooled_sigma)
+        report["sigma_dg_mean"] = sum(pooled_sigma) / len(pooled_sigma)
+        report["holdout_n"] = len(pooled_truth)
+        report["calibration_worst_group"], report["worst_group"] = worst
     if len(pooled_truth) >= 3:
         report["logo_r2"] = _r2(pooled_truth, pooled_pred)
     if report["logo_r2"] is None:
         report["reason"] = (
             f"{len(groups)} clusters, and no grouped fold produced one: every split left "
             "fewer than two training labels, or the held-out residuals had no variance. "
-            "logo_r2 is not invented."
+            "logo_r2, and with it the grouped nll, calibration and sigma, are not invented."
         )
     return report
 
@@ -571,8 +613,18 @@ def _publish(job: Dict[str, Any], report: Dict[str, Any], elapsed: float) -> int
         promoted=False,
         notes=" ".join(filter(None, [
             str(job.get("notes") or ""),
-            # Leave-one-OUT, reported beside the grouped one and never as it (item 73).
+            # Leave-one-OUT, reported beside the grouped ones and never as them (item 73 for
+            # r2, J15 for the other three). The manifest has fields for the grouped numbers
+            # only, so these ride here -- which is also where a human reads them when the gate
+            # refuses a round that had no grouped fold at all.
             f"loo_r2={report['loo_r2']}" if report["loo_r2"] is not None else "",
+            f"calibration_loo={report['calibration_loo']}"
+            if report["calibration_loo"] is not None else "",
+            f"nll_loo={report['nll_loo']}" if report["nll_loo"] is not None else "",
+            # The subgroup a pooled z-score hides. Named, so it can be looked at.
+            f"calibration_worst_group={report['calibration_worst_group']}"
+            f"@{report['worst_group']}"
+            if report["calibration_worst_group"] is not None else "",
             # Which prior this version corrects. Without it a `v0` is an unlabelled starting
             # point rather than "public residual R, zero in-house labels".
             f"residual=v{report['residual_version']}",

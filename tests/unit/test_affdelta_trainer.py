@@ -553,6 +553,110 @@ def test_the_manifest_carries_what_the_gate_reads(tmp_path):
     assert decision.rule != "holdout_groups_unknown"
 
 
+# -- J15: the calibration describes the fold the gate thinks it does --------
+
+
+def _round(tmp_path, corpus) -> tuple:
+    """One round, and the report it wrote beside the version.
+
+    The report is read from `metrics.json` rather than by calling `evaluate` with examples
+    this file projected itself: a second projection here would be a second implementation of
+    `run_round`'s own three lines, and the fixtures would stop testing the round.
+    """
+    job = _job(tmp_path, corpus)
+    run_round(job, fit=_stub_gp)
+    metrics = json.loads(Path(job["output_dir"], "metrics.json").read_text())
+    manifest = ModelRegistry(job["registry_root"]).read_manifest("aff_delta", 0)
+    return metrics, manifest
+
+
+def test_the_published_calibration_is_the_grouped_one_not_the_leave_one_out_one(tmp_path):
+    """**The regression nobody wrote, one key over from item 73's.**
+
+    `nll` and `calibration` were the leave-one-out numbers, published into a manifest whose
+    `calibration` field Model B fills from a real held-out cluster. One key, two meanings,
+    and `asteer.promotion` reading both as evidence about the same question.
+
+    Three offset clusters make the two numbers differ, which is the only condition under
+    which this test can fail on the old code -- the same reason `_grouped_corpus` carries a
+    bump at all.
+    """
+    report, _ = _round(tmp_path, _grouped_corpus())
+
+    assert report["calibration_loo"] is not None and report["nll_loo"] is not None
+    assert report["calibration"] != pytest.approx(report["calibration_loo"]), (
+        "the published calibration equals the leave-one-out one, which is the defect")
+    assert report["nll"] != pytest.approx(report["nll_loo"])
+    assert report["calibration"] > report["calibration_loo"], (
+        "a z-score taken with the point's own cluster in the training set should look "
+        "better calibrated than one taken across a held-out cluster")
+    assert report["holdout_n"] == 12, "every grouped label is held out exactly once"
+
+
+def test_the_manifest_hands_the_gate_the_grouped_calibration(tmp_path):
+    """Same key, same units, and now the same fold as `logo_r2` beside it.
+
+    The gate's `calibration_in_range` sits next to its `logo_r2 <= 0` rule and both judge
+    generalisation off the cluster, so a calibration from a different experiment is a number
+    the gate cannot use -- however plausible it looks.
+    """
+    report, manifest = _round(tmp_path, _grouped_corpus())
+
+    assert manifest.calibration == pytest.approx(report["calibration"])
+    assert manifest.nll == pytest.approx(report["nll"])
+    assert manifest.holdout_n == report["holdout_n"]
+
+    assert "calibration_loo=" in manifest.notes, "the leave-one-out number is still reported"
+    loo = float(manifest.notes.split("calibration_loo=")[1].split()[0])
+    assert loo == pytest.approx(report["calibration_loo"])
+
+    from asteer.promotion import decide
+
+    decision = decide(manifest)
+    assert decision.evidence["calibration"] == pytest.approx(report["calibration"])
+    assert decision.rule != "calibration_out_of_band"
+
+
+def test_the_worst_group_rides_beside_the_pooled_calibration(tmp_path):
+    """J14's hand-off, made a published number.
+
+    Over the rehearsal's 33 held-out targets the pooled calibration is 1.76 and inside the
+    gate's [0.1, 5.0] band while one group reads 17.7. A pooled z-score hides a subgroup that
+    is catastrophically overconfident, and for Model C the sigma is the product. Reported and
+    named, deliberately without a bar: a bar is `PromotionBars`' business.
+    """
+    report, manifest = _round(tmp_path, _grouped_corpus())
+
+    assert report["worst_group"] in {"sc0", "sc1", "sc2"}
+    assert report["calibration_worst_group"] >= report["calibration"], (
+        "the worst single fold cannot be better calibrated than the pool it is in")
+    assert f"calibration_worst_group={report['calibration_worst_group']}" in manifest.notes
+    assert f"@{report['worst_group']}" in manifest.notes
+
+
+def test_below_three_groups_the_grouped_trio_is_none_and_the_loo_trio_is_not(tmp_path):
+    """`None` with a reason, exactly as `logo_r2` already was.
+
+    The consequence is deliberate: the gate then stops at `no_heldout_metrics`, whose sentence
+    is loose for a round that held out every label one at a time. The verdict is right either
+    way -- INSUFFICIENT_EVIDENCE -- and the leave-one-out numbers are in `metrics.json` and in
+    the notes, so a human sees what was computed. Tightening the string is an asteer commit.
+    """
+    report, manifest = _round(tmp_path, _grouped_corpus(groups=2, per_group=6))
+
+    assert report["nll"] is None and report["calibration"] is None
+    assert report["sigma_dg_mean"] is None and report["holdout_n"] == 0
+    assert report["nll_loo"] is not None and report["calibration_loo"] is not None
+    assert report["loo_r2"] is not None
+    assert "not invented" in report["reason"]
+
+    from asteer.promotion import PromotionOutcome, decide
+
+    decision = decide(manifest)
+    assert decision.outcome is PromotionOutcome.INSUFFICIENT_EVIDENCE
+    assert "calibration_loo=" in manifest.notes
+
+
 # -- J11: a residual that knows its own columns, and a C that can serve ------
 
 

@@ -371,6 +371,42 @@ def test_the_report_records_what_the_prior_is_worth(report):
     assert report["corpus"]["folds_per_cell"] == 20
 
 
+def test_the_rounds_calibration_is_the_grouped_one_and_it_is_in_band(report):
+    """**J15's criterion, on real data**, and J15's defect shown on it.
+
+    `evaluate`'s calibration is now taken on the folds that held a whole target out, so it is
+    comparable to this module's independently computed table -- the agreement is asserted at
+    fit time too, and `run()` raises on a drift over 1e-9. The leave-one-out number it used to
+    publish is still here under its own name, and the two differ.
+    """
+    metrics = report["evaluate"]
+
+    assert metrics["calibration"] == pytest.approx(report["logo"]["calibration"], abs=1e-9)
+    assert metrics["holdout_n"] == report["logo"]["n"] == 330
+    assert metrics["calibration_loo"] != pytest.approx(metrics["calibration"])
+    assert 0.1 <= metrics["calibration"] <= 5.0, (
+        "J15's own pass criterion: the contract's band, not a widened one")
+
+
+def test_the_worst_group_is_one_the_pooled_calibration_hides(report):
+    """The number J14 handed J15, published by the round and tied back to the stratification.
+
+    The pooled calibration sits inside the gate's band while the worst single fold is far
+    outside it, and that fold is one of the two contiguous-motif targets -- the class the
+    prior's own family never contained. The group id is asserted against the island counts in
+    the committed table rather than written out here, so the link is a derivation.
+    """
+    metrics = report["evaluate"]
+    unseen_class = {fold["group"] for fold in report["logo"]["folds"]
+                    if fold["island_count"] == 1}
+
+    assert metrics["worst_group"] in unseen_class
+    assert metrics["calibration_worst_group"] > 5.0 >= metrics["calibration"], (
+        "the pooled number is in band and the worst group is not, which is the whole point")
+    worst = next(f for f in report["logo"]["folds"] if f["group"] == metrics["worst_group"])
+    assert metrics["calibration_worst_group"] == pytest.approx(worst["calibration"], abs=1e-9)
+
+
 # -- the one thing committed data cannot prove -------------------------------
 
 
